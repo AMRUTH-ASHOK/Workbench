@@ -271,62 +271,75 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
 
     def harvest(self):
         with run_lock(self.settings.data_dir / "harvest.lock"):
-            for worker in self.store.overview()["workers"]:
-                if worker.get("role") != "case" or worker.get("state") != "working":
+            for observed in self.store.overview()["workers"]:
+                if observed.get("role") != "case":
                     continue
                 try:
-                    status_raw = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/status.json", timeout=15)
-                    status = json.loads(status_raw)
-                    if status.get("job_id") != worker["job_id"] or status.get("case_id") != worker["case_id"]:
-                        raise ValueError("Worker result identity mismatch")
-                    if status["state"] == "working":
-                        age = (datetime.now(timezone.utc) - datetime.fromisoformat(status["started_at"])).total_seconds()
-                        if age > 1650:
-                            raise TimeoutError("Worker stopped reporting within its deadline")
-                        continue
-                    audit = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/tool-audit.jsonl 2>/dev/null || true", timeout=15)
-                    events = [json.loads(line) for line in audit.splitlines() if line.strip()]
-                    self.store.save_evidence("audit-" + worker["job_id"] + ".json", events)
+                    with run_lock(self.settings.data_dir / ("case-" + observed["key"] + ".lock")):
+                        self.harvest_case(observed["key"])
+                except AlreadyRunning:
+                    # Launch owns the same lock until terminal dispatch settles.
+                    continue
+
+    def harvest_case(self, key):
+        # Re-read after acquiring the case lock; the inventory snapshot may
+        # precede a launch failure or a replacement job.
+        worker = self.store.worker(key)
+        if not worker or worker.get("role") != "case" or worker.get("state") != "working":
+            return
+        try:
+            status_raw = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/status.json", timeout=15)
+            status = json.loads(status_raw)
+            if status.get("job_id") != worker["job_id"] or status.get("case_id") != worker["case_id"]:
+                raise ValueError("Worker result identity mismatch")
+            if status["state"] == "working":
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(status["started_at"])).total_seconds()
+                if age > 1650:
+                    raise TimeoutError("Worker stopped reporting within its deadline")
+                return
+            audit = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/tool-audit.jsonl 2>/dev/null || true", timeout=15)
+            events = [json.loads(line) for line in audit.splitlines() if line.strip()]
+            self.store.save_evidence("audit-" + worker["job_id"] + ".json", events)
+            self.store.save_evidence("status-" + worker["job_id"] + ".json", status)
+            if status["state"] == "complete":
+                if status.get("source_validation") != "verified":
+                    raise ValueError("Case freshness was not verified before publishing")
+                raw = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/result.json")
+                result = Analysis.model_validate_json(raw)
+                if result.run_id != worker["run_id"] or result.case_id != worker["case_id"] or result.source_revision != worker["source_revision"]:
+                    raise ValueError("Worker result does not match assigned task")
+                from collections import Counter
+                from .models import Coverage
+                completed = Counter(e.get("skill") or e.get("agent_type") or e.get("helper") or e["tool"] for e in events if e.get("event") == "PostToolUse" and e.get("allowed"))
+                reported = [dict(c, state="worker_reported") for c in result.coverage]
+                result.coverage = [Coverage(name=name, state="observed", detail=f"{count} completed call(s), recorded by the worker tool audit") for name, count in completed.items()] + [Coverage.model_validate(c) for c in reported]
+                command_path = self.settings.data_dir/"evidence"/("command-" + worker["job_id"] + ".json")
+                if command_path.exists():
+                    if not status.get("intake_verified"):
+                        verification = json.loads(self.ssh(worker["host"], "python3.10 ~/workbench-runtime/worker_runner.py verify-intake " + worker["job_dir"] + "/job.json", timeout=30))
+                        status["intake_verified"] = verification.get("verified") is True
+                    result.coverage.insert(0, Coverage(name="Support Agent /start", state="verified" if status.get("intake_verified") else "dispatched", detail="Submitted as a real terminal user command. " + ("Case initialization and context persistence verified from this session and its tool audit." if status.get("intake_verified") else "Intake completion has not been verified; see gaps and audit.")))
                     self.store.save_evidence("status-" + worker["job_id"] + ".json", status)
-                    if status["state"] == "complete":
-                        if status.get("source_validation") != "verified":
-                            raise ValueError("Case freshness was not verified before publishing")
-                        raw = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/result.json")
-                        result = Analysis.model_validate_json(raw)
-                        if result.run_id != worker["run_id"] or result.case_id != worker["case_id"] or result.source_revision != worker["source_revision"]:
-                            raise ValueError("Worker result does not match assigned task")
-                        from collections import Counter
-                        from .models import Coverage
-                        completed = Counter(e.get("skill") or e.get("agent_type") or e.get("helper") or e["tool"] for e in events if e.get("event") == "PostToolUse" and e.get("allowed"))
-                        reported = [dict(c, state="worker_reported") for c in result.coverage]
-                        result.coverage = [Coverage(name=name, state="observed", detail=f"{count} completed call(s), recorded by the worker tool audit") for name, count in completed.items()] + [Coverage.model_validate(c) for c in reported]
-                        command_path = self.settings.data_dir/"evidence"/("command-" + worker["job_id"] + ".json")
-                        if command_path.exists():
-                            if not status.get("intake_verified"):
-                                verification = json.loads(self.ssh(worker["host"], "python3.10 ~/workbench-runtime/worker_runner.py verify-intake " + worker["job_dir"] + "/job.json", timeout=30))
-                                status["intake_verified"] = verification.get("verified") is True
-                            result.coverage.insert(0, Coverage(name="Support Agent /start", state="verified" if status.get("intake_verified") else "dispatched", detail="Submitted as a real terminal user command. " + ("Case initialization and context persistence verified from this session and its tool audit." if status.get("intake_verified") else "Intake completion has not been verified; see gaps and audit.")))
-                            self.store.save_evidence("status-" + worker["job_id"] + ".json", status)
-                        self.store.ingest_analysis(result)
-                        if status.get("intake_verified"):
-                            worker["intake_revision"] = worker["source_revision"]
-                    worker.update(status)
-                    worker["error"] = status.get("error")
-                    if status["state"] == "failed":
-                        from datetime import timedelta
-                        worker["retry_after"] = (datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-                    worker["session_id"] = status.get("session_id")
-                    self.store.worker(worker["key"], worker)
-                except Exception as exc:
-                    from datetime import timedelta
-                    age = (datetime.now(timezone.utc) - datetime.fromisoformat(worker["started_at"])).total_seconds()
-                    if isinstance(exc, (subprocess.TimeoutExpired, RuntimeError)) and age < 1650:
-                        # An SSH/export interruption does not terminate the remote process.
-                        # Keep polling the same job rather than stranding its eventual result.
-                        worker.update(error="Export temporarily unavailable; retrying the same job. " + str(exc)[:1000])
-                    else:
-                        worker.update(state="failed", error=str(exc)[:1500], retry_after=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat())
-                    self.store.worker(worker["key"], worker)
+                self.store.ingest_analysis(result)
+                if status.get("intake_verified"):
+                    worker["intake_revision"] = worker["source_revision"]
+            worker.update(status)
+            worker["error"] = status.get("error")
+            if status["state"] == "failed":
+                from datetime import timedelta
+                worker["retry_after"] = (datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+            worker["session_id"] = status.get("session_id")
+            self.store.worker(worker["key"], worker)
+        except Exception as exc:
+            from datetime import timedelta
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(worker["started_at"])).total_seconds()
+            if isinstance(exc, (subprocess.TimeoutExpired, RuntimeError)) and age < 1650:
+                # An SSH/export interruption does not terminate the remote process.
+                # Keep polling the same job rather than stranding its eventual result.
+                worker.update(error="Export temporarily unavailable; retrying the same job. " + str(exc)[:1000])
+            else:
+                worker.update(state="failed", error=str(exc)[:1500], retry_after=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat())
+            self.store.worker(worker["key"], worker)
 
     def reconcile_workers(self):
         active = {c["id"] for c in self.store.cases()}

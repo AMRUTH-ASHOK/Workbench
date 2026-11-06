@@ -208,6 +208,25 @@ def test_resumed_arclet_waits_and_reattaches_owned_terminal_before_inspecting_sh
     assert reattach[reattach.index('--request-id')+1]==store.worker('case-key')['reattach_request_id']
 
 
+def test_harvest_skips_case_while_terminal_launch_holds_lock(store,monkeypatch):
+    from workbench.coordinator import Coordinator,run_lock
+    co=Coordinator(store)
+    store.worker('case-A',dict(key='case-A',role='case',state='working'))
+    monkeypatch.setattr(co,'harvest_case',lambda key:pytest.fail('Launch still owns this case'))
+    with run_lock(store.settings.data_dir/'case-case-A.lock'):
+        co.harvest()
+
+
+def test_harvest_rereads_worker_state_after_inventory_snapshot(store,monkeypatch):
+    from workbench.coordinator import Coordinator
+    co=Coordinator(store)
+    store.worker('case-A',dict(key='case-A',role='case',state='failed',error='Dispatch failed'))
+    monkeypatch.setattr(store,'overview',lambda:{'workers':[dict(key='case-A',role='case',state='working')]})
+    monkeypatch.setattr(co,'ssh',lambda *a,**k:pytest.fail('Failed dispatch must not be resurrected'))
+    co.harvest()
+    assert store.worker('case-A')['state']=='failed'
+
+
 def test_collector_transport_timeout_retries_same_export(store,monkeypatch):
     import subprocess
     from conftest import bundle
