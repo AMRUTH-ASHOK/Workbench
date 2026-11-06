@@ -50,7 +50,8 @@ class Coordinator:
         try:
             data = json.loads(result.stdout)
         except ValueError:
-            raise RuntimeError("ArcaTerm is unavailable. Open ArcaTerm and resume the refresh.")
+            detail = (result.stderr or result.stdout).strip()[-1000:]
+            raise RuntimeError("ArcaTerm returned no valid response for " + " ".join(args[:2]) + ". " + (detail or "Open ArcaTerm and resume the refresh."))
         if result.returncode:
             raise RuntimeError(data.get("message", "ArcaTerm command failed"))
         return data
@@ -183,6 +184,19 @@ class Coordinator:
         return due
 
     def start_terminal(self, worker, remote_dir, case_number):
+        # SSH may work before a resumed tab has a live terminal surface. Wait
+        # before inspecting the shell or typing; reattach only this owned tab.
+        try:
+            ready = self.arca("arclet", "wait", "--tab", worker["tab_id"], "--for", "terminal-ready", "--timeout", "30s", timeout=35)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            ready = {}
+        if ready.get("matched") is not True:
+            worker["reattach_request_id"] = uuid7()
+            self.store.worker(worker["key"], worker)
+            self.arca("arclet", "reattach", "--tab", worker["tab_id"], "--request-id", worker["reattach_request_id"])
+            ready = self.arca("arclet", "wait", "--tab", worker["tab_id"], "--for", "terminal-ready", "--timeout", "30s", timeout=35)
+            if ready.get("matched") is not True:
+                raise RuntimeError("The owned Arclet terminal is reconnecting. Check its tab in ArcaTerm, then Resume.")
         panes = self.arca("pane", "list", "--tab", worker["tab_id"]).get("panes", [])
         if len(panes) != 1 or panes[0].get("process") not in {"zsh", "bash", "sh", "-zsh", "-bash"}:
             raise RuntimeError("The owned case terminal is busy. Finish its current program before resuming intake.")

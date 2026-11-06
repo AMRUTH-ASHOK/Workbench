@@ -158,6 +158,7 @@ def test_terminal_dispatch_targets_owned_idle_pane_and_journals_command(store,mo
     def arca(*args,**kwargs):
         nonlocal running
         calls.append(args)
+        if args[:2]==('arclet','wait'):return {'matched':True}
         if args[:2]==('pane','list'):return {'panes':[dict(id='owned-pane',process='zsh')]}
         if args[:2]==('pane','run'):running=True
         if args[:2]==('pane','dump'):return {'text':'Claude Code\n❯\n? for shortcuts' if running else '$ '}
@@ -178,11 +179,33 @@ def test_busy_case_terminal_never_receives_a_shell_command(store,monkeypatch):
     co=Coordinator(store);calls=[]
     def arca(*args,**kwargs):
         calls.append(args)
+        if args[:2]==('arclet','wait'):return {'matched':True}
         return {'panes':[dict(id='owned-pane',process='claude')]}
     monkeypatch.setattr(co,'arca',arca)
     with pytest.raises(RuntimeError,match='busy'):
         co.start_terminal(dict(tab_id='owned-tab'),'~/job','00000001')
-    assert len(calls)==1
+    assert len(calls)==2
+
+
+def test_resumed_arclet_waits_and_reattaches_owned_terminal_before_inspecting_shell(store,monkeypatch):
+    from workbench.coordinator import Coordinator
+    co=Coordinator(store);calls=[];waits=0
+    def arca(*args,**kwargs):
+        nonlocal waits
+        calls.append(args)
+        if args[:2]==('arclet','wait'):
+            waits+=1
+            return {'matched':waits==2}
+        if args[:2]==('pane','list'):
+            return {'panes':[dict(id='owned-pane',process='claude')]}
+        return {}
+    monkeypatch.setattr(co,'arca',arca)
+    with pytest.raises(RuntimeError,match='busy'):
+        co.start_terminal(dict(key='case-key',tab_id='owned-tab'),'~/job','00000001')
+    assert [c[:2] for c in calls]==[('arclet','wait'),('arclet','reattach'),('arclet','wait'),('pane','list')]
+    reattach=calls[1]
+    assert reattach[reattach.index('--tab')+1]=='owned-tab'
+    assert reattach[reattach.index('--request-id')+1]==store.worker('case-key')['reattach_request_id']
 
 
 def test_collector_transport_timeout_retries_same_export(store,monkeypatch):
@@ -230,6 +253,7 @@ def test_pending_shell_input_is_preserved(store,monkeypatch):
     co=Coordinator(store);calls=[]
     def arca(*args,**kwargs):
         calls.append(args)
+        if args[:2]==('arclet','wait'):return {'matched':True}
         return {'panes':[dict(id='owned-pane',process='zsh')]} if args[:2]==('pane','list') else {'text':'$ unfinished user command'}
     monkeypatch.setattr(co,'arca',arca)
     with pytest.raises(RuntimeError,match='pending input'):
