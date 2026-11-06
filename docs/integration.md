@@ -1,7 +1,7 @@
 # Integration contracts and operating limits
 
 - **ArcaTerm:** JSON CLI lifecycle, explicit Workbench-owned Arclets/tabs, SSH
-  exports. The transcript endpoint is optional because discovery observed identity
+  exports plus addressed terminal user-command submission. The transcript endpoint is optional because discovery observed identity
   and transcript-availability failures. New Arclet requests are journalled with
   stable UUIDv7 IDs. No commands are typed into an arbitrary focused pane.
 - **Inventory:** production Salesforce `Case`, with selected allowed identifiers,
@@ -36,3 +36,10 @@ The daily learning pass proposes descriptive review items. It does not invent a
 causal explanation, promote a lesson automatically, or rewrite trusted project
 instructions. Human-marked sent/submitted states are evidence of the engineer's
 recorded action; the system does not claim to have sent or verified delivery.
+
+`/support-agent:start` is user-invocable and disables model invocation. It must
+enter through the interactive CLI as a user command. A dispatched slash command
+is not by itself proof of successful enrichment or ingested usage. The coordinator
+retains its request ID/receipt and checks the resulting session metadata and audit.
+Transient collector SSH timeouts retry the existing export within its deadline,
+without restarting collection or discarding completed checkpoints.

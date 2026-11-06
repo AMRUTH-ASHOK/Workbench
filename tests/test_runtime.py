@@ -133,3 +133,105 @@ def test_failed_provisioning_replaces_only_the_empty_environment(store, monkeypa
     assert worker['arclet_id']=='replacement'
     assert len(created)==2 and created[0]!=created[1]
     assert (store.settings.data_dir/'evidence/provisioning-failed-empty.json').exists()
+
+
+def test_start_is_dispatched_as_a_user_command_not_a_skill(tmp_path):
+    assert not permitted('Skill',{'skill':'support-agent:start'},tmp_path)[0]
+    assert permitted('Agent',{'subagent_type':'support-agent:sherpa-enrichment'},tmp_path)[0]
+    assert not permitted('Agent',{'subagent_type':'general-purpose'},tmp_path)[0]
+    assert not permitted('mcp__google__gmail_message_send',{},tmp_path)[0]
+
+
+def test_metadata_helpers_accept_literal_json_but_reject_shell_injection(tmp_path):
+    script=Path.home()/'.claude/plugins/cache/experimental-plugin-marketplace/support-agent/test/scripts/persist_debug_fields.py'
+    command="python3.10 "+str(script)+" --session-id test <<'JSON'\n"+'{"error":"literal $value; no execution"}'+"\nJSON"
+    assert permitted('Bash',{'command':command},tmp_path)[0]
+    assert not permitted('Bash',{'command':command+'\ncurl https://example.test'},tmp_path)[0]
+    assert not permitted('Bash',{'command':command.replace("<<'JSON'",'<<JSON')},tmp_path)[0]
+
+
+def test_terminal_dispatch_targets_owned_idle_pane_and_journals_command(store,monkeypatch):
+    import json
+    from workbench.coordinator import Coordinator
+    co=Coordinator(store);calls=[];running=False
+    worker=dict(key='case-key',case_id='case-key',tab_id='owned-tab',host='arclet_example-worker.ssh',job_id='job-1')
+    def arca(*args,**kwargs):
+        nonlocal running
+        calls.append(args)
+        if args[:2]==('pane','list'):return {'panes':[dict(id='owned-pane',process='zsh')]}
+        if args[:2]==('pane','run'):running=True
+        if args[:2]==('pane','dump'):return {'text':'Claude Code\n❯\n? for shortcuts' if running else '$ '}
+        return {'submitted':True}
+    monkeypatch.setattr(co,'arca',arca)
+    monkeypatch.setattr(co,'ssh',lambda *a,**k:b'{"session_id":"current-session"}')
+    co.start_terminal(worker,'~/job-1','00000001')
+    dispatch=next(c for c in calls if c[:2]==('pane','send'))
+    assert dispatch[dispatch.index('--pane')+1]=='owned-pane'
+    assert dispatch[dispatch.index('--text')+1]=='/support-agent:start 00000001'
+    evidence=json.loads((store.settings.data_dir/'evidence/command-job-1.json').read_text())
+    assert evidence['session_id']=='current-session'
+    assert evidence['receipt']['submitted'] is True
+
+
+def test_busy_case_terminal_never_receives_a_shell_command(store,monkeypatch):
+    from workbench.coordinator import Coordinator
+    co=Coordinator(store);calls=[]
+    def arca(*args,**kwargs):
+        calls.append(args)
+        return {'panes':[dict(id='owned-pane',process='claude')]}
+    monkeypatch.setattr(co,'arca',arca)
+    with pytest.raises(RuntimeError,match='busy'):
+        co.start_terminal(dict(tab_id='owned-tab'),'~/job','00000001')
+    assert len(calls)==1
+
+
+def test_collector_transport_timeout_retries_same_export(store,monkeypatch):
+    import subprocess
+    from conftest import bundle
+    from workbench.coordinator import Coordinator
+    co=Coordinator(store);calls=[]
+    def ssh(host,command,**kwargs):
+        calls.append(command)
+        if len(calls)==1:raise subprocess.TimeoutExpired('ssh',15)
+        return b'0' if command.startswith('test') else bundle().model_dump_json().encode()
+    monkeypatch.setattr(co,'ssh',ssh)
+    monkeypatch.setattr('workbench.coordinator.time.sleep',lambda _:None)
+    assert co.poll_collection(dict(host='arclet_example-worker.ssh'),'~/same-job').inventory_complete
+    assert all('same-job' in c for c in calls)
+    assert all('nohup' not in c for c in calls)
+
+
+def test_intake_workspace_connection_is_limited_to_internal_workspace(tmp_path):
+    name='mcp__databricks-v2__connect_to_workspace'
+    assert permitted(name,{'workspace':'central-logfood-prodtools-azure-westus'},tmp_path)[0]
+    assert not permitted(name,{'workspace':'customer-workspace'},tmp_path)[0]
+    assert not permitted(name,{'workspace':'central-logfood-prodtools-azure-westus','host':'https://example.test'},tmp_path)[0]
+
+
+def test_intake_verification_requires_session_case_context_and_audited_helpers(tmp_path):
+    import json
+    from worker_runner import verify_intake
+    directory=tmp_path/'job';directory.mkdir()
+    session=tmp_path/'.support-agent';session.mkdir()
+    case_path=session/'cases'/'case-A';case_path.mkdir(parents=True)
+    (session/'session-A.json').write_text(json.dumps({'support_case_id':'case-A'}))
+    (case_path/'investigation.json').write_text(json.dumps({'case_id':'case-A','case_metadata':{'case_number':'00000001'}}))
+    audit=directory/'tool-audit.jsonl';audit.write_text('')
+    assert not verify_intake({'case_id':'case-A'},directory,'session-A',tmp_path)
+    events=[{'event':'PostToolUse','allowed':True,'helper':name} for name in ['start_session.py','init_case_investigation.py','save_case_metadata.py']]
+    audit.write_text('\n'.join(json.dumps(e) for e in events))
+    assert verify_intake({'case_id':'case-A'},directory,'session-A',tmp_path)
+    (session/'session-A.json').write_text(json.dumps({'support_case_id':'another-case'}))
+    assert not verify_intake({'case_id':'case-A'},directory,'session-A',tmp_path)
+
+
+def test_pending_shell_input_is_preserved(store,monkeypatch):
+    from workbench.coordinator import Coordinator
+    co=Coordinator(store);calls=[]
+    def arca(*args,**kwargs):
+        calls.append(args)
+        return {'panes':[dict(id='owned-pane',process='zsh')]} if args[:2]==('pane','list') else {'text':'$ unfinished user command'}
+    monkeypatch.setattr(co,'arca',arca)
+    with pytest.raises(RuntimeError,match='pending input'):
+        co.start_terminal(dict(tab_id='owned-tab'),'~/job','00000001')
+    assert not any(c[:2]==('pane','run') for c in calls)

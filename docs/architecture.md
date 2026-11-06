@@ -39,13 +39,20 @@ sources take precedence over revision-ledger projections. Ledger fallback is
 labelled when a serving query fails. Results are immutable per revision; an
 unexpected score change under the same revision fails atomically.
 
-Each case worker runs the installed Isaac/Support Agent skills in an owned Arclet.
+Each case worker runs interactive Isaac in its owned Arclet terminal. The
+coordinator checks that exact pane is idle, starts the guarded runner, waits for
+the SessionStart hook and terminal prompt, then types `/support-agent:start` as
+a user command using ArcaTerm's addressed, journalled pane API. This respects the
+command's `disable-model-invocation` setting and never sends text to an arbitrary
+focused pane. A dispatch receipt proves submission; session metadata separately
+verifies intake. Documented intake/read subagents inherit the same tool gate.
 Prompts contain a fixed case/run/revision manifest and the current evidence.
 The separate tool gate enforces draft-only actions, even if a nested skill offers
 Slack, email, feedback, write-back, or deployment actions. Normal intake telemetry
 and enrichment are authorized; message/feedback submission is excluded.
 
-Workers return a JSON-schema result. The runner independently checks live owner,
+Workers export a report using the supplied JSON schema. A bounded runner
+stops only that job's agent and descendants after export or timeout. The runner independently checks live owner,
 update timestamp and open lifecycle before exposing the result. The coordinator
 checks the job manifest and local source revision, saves evidence/audits, then
 publishes analysis and drafts. No transcript endpoint is required. Agent claims

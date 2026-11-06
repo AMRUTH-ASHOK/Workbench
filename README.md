@@ -37,7 +37,8 @@ the installer after changing the application. `Workbench.command` opens the desk
 - Codex heartbeat automations trigger the existing coordinator. A local recovery
   check coalesces missed windows into one catch-up during the working shift.
 - One reusable Arclet per active case, plus the collector and research workers
-  when needed. Case workers cannot create nested agents.
+  when needed. Only documented Support Agent intake/read agents can run inside
+  a case worker, under the same tool gate.
 - A source/evaluation revision or due action can trigger investigation. Unchanged
   waiting cases reuse their evidence. Collection and case analysis have separate
   progress, timestamps, and failure states.
@@ -60,13 +61,19 @@ they do not send anything. There are no send/submit endpoints. A case revision
 supersedes its old drafts and generated proposed actions. A deterministic live
 check of update time, owner and lifecycle gates each worker result.
 
+Support Agent `/start` is submitted as a real user slash command in the owned
+ArcaTerm pane. Its `disable-model-invocation` flag is respected: the coordinator
+never tries to invoke it through the model Skill tool. Each invocation keeps a
+journalled terminal receipt; intake completion is verified separately from dispatch.
+
 Tool coverage distinguishes actual worker calls from official ingested usage.
 Useful diagnostics are selected for the case, without tool-call quotas. Feedback
 drafts are based on observed tool behavior and never count as submitted feedback.
 
 The worker's PreToolUse gate denies communication writes, feedback submission,
 customer-infrastructure jobs, inline shell/code execution and writes outside its
-own output files. It permits documented investigation helpers, read tools, EPICA,
+own output files. Approved metadata helpers may receive a single quoted JSON
+heredoc; arbitrary shell commands remain unavailable. It permits documented investigation helpers, read tools, EPICA,
 and normal Support Agent intake enrichment. Post-tool audits are exported locally.
 Unsupported optional steps return gaps; workers never wait on permission menus.
 
