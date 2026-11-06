@@ -2,7 +2,7 @@ import json
 import pytest
 from pydantic import ValidationError
 from conftest import CASE_ID, OTHER_ID, analysis, bundle, case, evaluation
-from workbench.models import DraftPatch, score_band
+from workbench.models import DraftPatch, score_band, now
 
 
 def test_scores_and_na_match_rubric():
@@ -57,7 +57,7 @@ def test_closed_lifecycle_wins_and_drafts_are_superseded(store):
     store.ingest_analysis(analysis())
     draft=store.case(CASE_ID)["drafts"][0]
     store.patch_draft(draft["id"],DraftPatch(state="reviewed"))
-    store.ingest(bundle(cases=[case(revision="revision-2",is_closed=True,closed_at="2026-11-06T12:00:00+00:00")]))
+    store.ingest(bundle(cases=[case(revision="revision-2",is_closed=True,closed_at=now())]))
     assert store.cases()==[]
     assert len(store.cases("closed"))==1
     assert store.case(CASE_ID)["drafts"][0]["state"]=="superseded"
@@ -141,3 +141,20 @@ def test_worker_date_only_proposal_is_retained_without_inventing_deadline():
     a=analysis(next_actions=[dict(title='Review follow-up',owner='Me',due_at='2026-11-06',reason='Suggested by stored review')])
     assert a.next_actions[0].due_at is None
     assert '2026-11-06' in a.next_actions[0].reason
+
+
+def test_outcomes_require_later_evidence_and_matching_model(store):
+    from datetime import datetime,timedelta,timezone
+    at=datetime.now(timezone.utc)
+    baseline=evaluation(result_id='before',produced_at=(at-timedelta(minutes=10)).isoformat(),covered_at=(at-timedelta(minutes=20)).isoformat(),model='model-A',rubric='rubric-A',scores={'ai_sat':8})
+    store.ingest(bundle(evaluations=[baseline]));store.ingest_analysis(analysis())
+    action=store.case(CASE_ID)['actions'][0];store.complete_action(action['id'],'done')
+    wrong=evaluation(result_id='different-model',produced_at=(at+timedelta(minutes=1)).isoformat(),covered_at=(at+timedelta(seconds=30)).isoformat(),model='model-B',rubric='rubric-A',scores={'ai_sat':3})
+    store.ingest(bundle(evaluations=[wrong]))
+    assert store.case(CASE_ID)['outcomes'][0]['after'] is None
+    matched=evaluation(result_id='comparable',produced_at=(at+timedelta(minutes=2)).isoformat(),covered_at=(at+timedelta(minutes=1)).isoformat(),model='model-A',rubric='rubric-A',scores={'ai_sat':9})
+    store.ingest(bundle(evaluations=[matched]))
+    outcome=store.case(CASE_ID)['outcomes'][0]
+    assert outcome['before']['result_id']=='before'
+    assert outcome['after']['result_id']=='comparable'
+    assert outcome['deltas']=={'ai_sat':1}

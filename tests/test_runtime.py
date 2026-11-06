@@ -115,3 +115,21 @@ def test_runner_owns_run_identity_but_rejects_wrong_case_revision():
     assert bind_manifest(result,job)['run_id']=='new-run'
     with pytest.raises(ValueError,match='case revision'):
         bind_manifest(dict(result,source_revision='old'),job)
+
+
+def test_failed_provisioning_replaces_only_the_empty_environment(store, monkeypatch):
+    from workbench.coordinator import Coordinator
+    co=Coordinator(store);created=[]
+    monkeypatch.setattr(co,'group',lambda:'test-group')
+    monkeypatch.setattr(co,'ssh',lambda *a,**k:b'')
+    def arca(*args,**kwargs):
+        if args[:2]==('arclet','create'):
+            created.append(args[args.index('--request-id')+1])
+            return dict(arcletId='failed-empty' if len(created)==1 else 'replacement',tabId='owned-tab')
+        return dict(environments=[dict(infrastructure='failed',environmentId=None)] if len(created)==1 else [dict(name='example-worker',infrastructure='running',environmentId='environment')])
+    monkeypatch.setattr(co,'arca',arca)
+    worker=co.ensure_worker('case-key','case','00000001')
+    assert worker['state']=='ready'
+    assert worker['arclet_id']=='replacement'
+    assert len(created)==2 and created[0]!=created[1]
+    assert (store.settings.data_dir/'evidence/provisioning-failed-empty.json').exists()

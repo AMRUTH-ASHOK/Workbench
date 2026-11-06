@@ -161,7 +161,7 @@ class Analysis(Record):
     case_id: str = Field(pattern=r"^[a-zA-Z0-9]{18}$")
     run_id: str
     source_revision: str
-    summary: str
+    summary: str = Field(description="A concise operational case brief: issue, current status, latest meaningful update, blocker and next step. Put tool execution details in coverage or gaps.")
     concerns: list[Concern] = Field(default_factory=list)
     next_actions: list[ProposedAction] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
