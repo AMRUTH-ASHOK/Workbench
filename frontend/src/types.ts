@@ -28,12 +28,37 @@ export type Action = {
 };
 export type Draft = {
   id: string;
-  kind: "customer" | "internal" | "feedback";
+  kind: "customer" | "engineering" | "internal" | "feedback";
+  variant: "standard" | "detailed" | "concise" | "high_level";
+  scenario: "update" | "follow_up";
+  use_when: string;
+  review_notes: string;
   title: string;
   body: string;
   state: string;
   updated_at: string;
   evidence: Evidence[];
+};
+export type WritingStyle = {
+  learning_enabled: boolean;
+  audiences: Record<
+    string,
+    {
+      preferences: string;
+      sample_count: number;
+      confidence: string;
+      observations: string[];
+      historical_source_count: number;
+      historical_observations: string[];
+    }
+  >;
+  examples: {
+    id: string;
+    audience: string;
+    origin: string;
+    source_label: string;
+    preview: string;
+  }[];
 };
 export type Analysis = {
   summary: string;

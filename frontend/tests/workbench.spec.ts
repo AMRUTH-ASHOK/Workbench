@@ -1,5 +1,79 @@
 import { test, expect } from "@playwright/test";
 
+test("message audiences, lengths and conditional follow-ups remain separate", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: /00000002.*Example unscored account/ })
+    .click();
+  await page.getByRole("button", { name: "Drafts (18)", exact: true }).click();
+  await expect(page.locator(".draft-editor")).toHaveCount(3);
+  await page
+    .getByLabel("Message length", { exact: true })
+    .selectOption("concise");
+  await expect(page.locator(".draft-editor")).toHaveCount(1);
+  await page.getByRole("button", { name: "Engineering", exact: true }).click();
+  await expect(
+    page.getByLabel("engineering concise update", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByLabel("Message purpose", { exact: true })
+    .selectOption("follow_up");
+  await page
+    .getByLabel("Message length", { exact: true })
+    .selectOption("high_level");
+  await expect(
+    page.getByLabel("engineering high_level follow_up", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Only after the pending engineering request is unanswered", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Internal", exact: true }).click();
+  await expect(
+    page.getByLabel("internal high_level follow_up", { exact: true }),
+  ).toBeVisible();
+  const editor = page.getByLabel("internal high_level follow_up", {
+    exact: true,
+  });
+  await editor.fill(
+    "Owner requested. Please confirm the engineering contact and next step before the customer update.",
+  );
+  await page
+    .getByRole("button", { name: "Save & learn from my edit", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "private writing profile",
+  );
+  await page.getByRole("button", { name: "Learning", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Your writing style", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator(".writing-audiences article")
+      .filter({
+        has: page.getByRole("heading", { name: "Internal", exact: true }),
+      }),
+  ).toContainText("1 confirmed examples");
+  await page
+    .getByLabel("Preferences for customer", { exact: true })
+    .fill("Use short paragraphs and acknowledge the latest evidence.");
+  await page
+    .getByRole("button", { name: "Save writing preferences", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "Writing preferences saved",
+  );
+  await page.reload();
+  await page.getByRole("button", { name: "Learning", exact: true }).click();
+  await expect(
+    page.getByLabel("Preferences for customer", { exact: true }),
+  ).toHaveValue("Use short paragraphs and acknowledge the latest evidence.");
+});
+
 test("queue keeps unscored cases and scores 8 as good", async ({ page }) => {
   await page.goto("/");
   await expect(

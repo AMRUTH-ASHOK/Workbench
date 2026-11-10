@@ -1,7 +1,8 @@
 # Workbench
 
 A local support desk for assigned cases: live ownership, official score history,
-evidence-backed next actions, and editable customer/internal/feedback drafts.
+evidence-backed next actions, and editable customer, engineering, internal and
+feedback drafts.
 
 ## Run locally
 
@@ -60,6 +61,26 @@ draft as sent. The manual sent/submitted controls record the engineer's action;
 they do not send anything. There are no send/submit endpoints. A case revision
 supersedes its old drafts and generated proposed actions. A deterministic live
 check of update time, owner and lifecycle gates each worker result.
+
+Communication options have detailed, concise and high-level variants, with
+conditional follow-ups where a pending request warrants one. Choose audience,
+message purpose and length in the Drafts view. Review notes and follow-up
+conditions stay outside the copyable message. EPIC-A output is optional reference;
+workers independently write from case evidence, preserving uncertainty and actual
+commitments across versions. Existing legacy drafts remain under Original.
+
+The Learning desk holds separate writing preferences for customer, engineering
+and internal messages. Add your own sent example, use **Save & learn from my
+edit**, or mark an edited message as manually sent. Unchanged generated drafts,
+copying, review marks and feedback do not train the writing profile. Attributed
+sent-history observations from investigations are stored separately as tentative
+structural patterns, with source message IDs; privacy summaries are never treated
+as exact text or confirmed examples. Other authors are excluded. The profile
+uses recent examples and observations; workers receive allowlisted structure
+descriptions rather than raw cross-case message text. Explicit preferences take
+precedence. Pause adaptive learning or forget examples/history in the Learning
+desk. Pausing stops new learning and use of learned patterns in future workers;
+existing drafts remain unchanged. This profile does not alter AGENTS.md.
 
 Support Agent `/start` is submitted as a real user slash command in the owned
 ArcaTerm pane. Its `disable-model-invocation` flag is respected: the coordinator

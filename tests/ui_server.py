@@ -6,6 +6,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from workbench.api import create_app
 from workbench.config import Settings
 from conftest import analysis, bundle, case, evaluation
+from workbench.models import DraftInput
 import uvicorn
 
 with tempfile.TemporaryDirectory(prefix='workbench-ui-') as directory:
@@ -16,5 +17,10 @@ with tempfile.TemporaryDirectory(prefix='workbench-ui-') as directory:
     second.account='Example unscored account'
     s.ingest(bundle(cases=[case(),second],evaluations=[first,evaluation()]))
     s.ingest_analysis(analysis())
+    s.ingest_analysis(analysis(case_id=second.id, drafts=[DraftInput(kind=audience, variant=variant, scenario=scenario,
+        title=f'{audience} {variant} {scenario}', body=f'{audience} evidence-based wording for the {variant} {scenario} message. Please confirm the specific next step.',
+        use_when='Only after the pending engineering request is unanswered' if scenario=='follow_up' else '',
+        review_notes='Verify source before sending') for audience in ('customer','engineering','internal')
+        for variant in ('detailed','concise','high_level') for scenario in ('update','follow_up')]))
     s.source('inventory','ready','Complete live inventory fixture')
     uvicorn.run(app,host='127.0.0.1',port=4319,log_level='warning')

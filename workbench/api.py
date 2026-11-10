@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .config import ROOT, get_settings
-from .models import ActionInput, DraftPatch, LessonInput, Record
+from .models import ActionInput, DraftPatch, LessonInput, Record, WritingPreferences, WritingExample
 from .store import Store
 
 
@@ -142,6 +142,30 @@ def create_app(settings=None, enable_recovery=True):
     @app.get("/api/lessons")
     def lessons():
         return store.lessons()
+
+    @app.get('/api/writing-style')
+    def writing_style():
+        return store.writing_style()
+
+    @app.patch('/api/writing-style')
+    def writing_preferences(body: WritingPreferences):
+        store.set_kv('writing_preferences', body.model_dump())
+        return store.writing_style()
+
+    @app.post('/api/writing-style/examples', status_code=201)
+    def writing_example(body: WritingExample):
+        try:
+            return {'id': store.add_writing_example(body)}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.delete('/api/writing-style/examples/{identifier}')
+    def forget_writing_example(identifier: str):
+        try:
+            store.forget_writing_example(identifier)
+            return {'state': 'forgotten'}
+        except KeyError as exc:
+            raise HTTPException(404, str(exc))
 
     @app.post("/api/lessons", status_code=201)
     def add_lesson(body: LessonInput):

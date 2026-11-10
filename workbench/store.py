@@ -11,6 +11,12 @@ def dumps(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def draft_key(case_id, revision, kind, body, variant="standard", scenario="update"):
+    # Preserve legacy identifiers, including human review and sent history.
+    suffix = "" if (variant, scenario) == ("standard", "update") else f":{variant}:{scenario}"
+    return hashlib.sha256(f"{case_id}:{revision}:{kind}:{body}{suffix}".encode()).hexdigest()
+
+
 class Store:
     def __init__(self, settings):
         self.settings = settings
@@ -51,6 +57,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS sources (key TEXT PRIMARY KEY, record TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS usage (id TEXT PRIMARY KEY, case_id TEXT NOT NULL, record TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS workers (key TEXT PRIMARY KEY, record TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS draft_options (draft_id TEXT PRIMARY KEY REFERENCES drafts(id), record TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS writing_examples (id TEXT PRIMARY KEY, audience TEXT NOT NULL, record TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS lessons (
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, lesson TEXT NOT NULL,
@@ -181,14 +189,20 @@ class Store:
             if not case or not case["active"] or case["revision"] != analysis.source_revision:
                 raise ValueError("Analysis is for an unknown or superseded case revision")
             db.execute("UPDATE cases SET analysis=?,analysis_revision=? WHERE id=?", (dumps(analysis.model_dump()), analysis.source_revision, analysis.case_id))
-            draft_keys = {hashlib.sha256(f"{analysis.case_id}:{analysis.source_revision}:{d.kind}:{d.body}".encode()).hexdigest() for d in analysis.drafts}
+            draft_keys = {draft_key(analysis.case_id, analysis.source_revision, d.kind, d.body, d.variant, d.scenario) for d in analysis.drafts}
             for old in db.execute("SELECT * FROM drafts WHERE case_id=? AND state='draft'", (analysis.case_id,)).fetchall():
-                original_key = hashlib.sha256(f"{analysis.case_id}:{old['revision']}:{old['kind']}:{old['body']}".encode()).hexdigest()
+                options = self._draft_options(db, old['id'])
+                original_key = draft_key(analysis.case_id, old['revision'], old['kind'], old['body'], options['variant'], options['scenario'])
                 if old["id"] not in draft_keys and old["id"] == original_key:
                     db.execute("UPDATE drafts SET state='superseded',updated_at=? WHERE id=?", (now(), old["id"]))
             for draft in analysis.drafts:
-                key = hashlib.sha256(f"{analysis.case_id}:{analysis.source_revision}:{draft.kind}:{draft.body}".encode()).hexdigest()
+                key = draft_key(analysis.case_id, analysis.source_revision, draft.kind, draft.body, draft.variant, draft.scenario)
                 db.execute("""INSERT OR IGNORE INTO drafts VALUES (?,?,?,?,?,?,?,'draft',?,?)""", (key, analysis.case_id, analysis.source_revision, draft.kind, draft.title, draft.body, dumps([e.model_dump() for e in draft.evidence]), now(), now()))
+                options = {k: getattr(draft, k) for k in ('variant', 'scenario', 'use_when', 'review_notes')}
+                db.execute("INSERT OR REPLACE INTO draft_options VALUES (?,?)", (key, dumps(options)))
+            if self.kv('writing_preferences', {'learning_enabled': True})['learning_enabled']:
+                for observation in analysis.writing_observations:
+                    self._save_writing_observation(db, analysis.case_id, observation)
             action_keys = {hashlib.sha256(f"{analysis.case_id}:{analysis.source_revision}:{a.title}".encode()).hexdigest() for a in analysis.next_actions}
             for old in db.execute("SELECT id FROM actions WHERE case_id=? AND state='proposed' AND origin_revision IS NOT NULL", (analysis.case_id,)).fetchall():
                 if old["id"] not in action_keys:
@@ -218,7 +232,7 @@ class Store:
         case["actions"] = [dict(r) for r in db.execute("SELECT * FROM actions WHERE case_id=? ORDER BY CASE state WHEN 'proposed' THEN 0 WHEN 'done' THEN 1 ELSE 2 END, due_at IS NULL, due_at,created_at", (case["id"],))]
         if detail:
             case["history"] = evaluations
-            case["drafts"] = [dict(r) | {"evidence": json.loads(r["evidence"])} for r in db.execute("SELECT * FROM drafts WHERE case_id=? ORDER BY created_at DESC", (case["id"],))]
+            case["drafts"] = [dict(r) | {"evidence": json.loads(r["evidence"])} | self._draft_options(db, r['id']) for r in db.execute("SELECT * FROM drafts WHERE case_id=? ORDER BY created_at DESC", (case["id"],))]
             case["usage"] = [json.loads(r[0]) for r in db.execute("SELECT record FROM usage WHERE case_id=?", (case["id"],))]
             case["events"] = [dict(r) for r in db.execute("SELECT * FROM events WHERE case_id=? ORDER BY created_at DESC LIMIT 100", (case["id"],))]
             case["outcomes"] = []
@@ -274,6 +288,15 @@ class Store:
                 raise ValueError("Only feedback has a submitted state")
             if draft["kind"] == "feedback" and state == "manually_sent":
                 raise ValueError("Feedback uses submitted_manually")
+            options = self._draft_options(db, draft_id)
+            edited = draft_key(draft['case_id'], draft['revision'], draft['kind'], body, options['variant'], options['scenario']) != draft_id
+            if patch.learn_style and (draft['kind'] == 'feedback' or not edited):
+                raise ValueError("Style learning requires your own edits to a communication draft")
+            prefs = self.kv('writing_preferences', {'learning_enabled': True, 'preferences': {}})
+            if patch.learn_style and not prefs['learning_enabled']:
+                raise ValueError("Writing style learning is paused")
+            if prefs['learning_enabled'] and edited and draft['kind'] != 'feedback' and (patch.learn_style or state == 'manually_sent'):
+                self._save_writing_example(db, 'draft:' + draft_id, draft['kind'], body, 'My edited draft', 'draft:' + draft_id)
             db.execute("UPDATE drafts SET body=?,state=?,updated_at=? WHERE id=?", (body, state, now(), draft_id))
             # Preserve the exact reviewed/sent text even if the editable draft changes later.
             db.execute("INSERT INTO events VALUES (?,?,?,?,?)", (str(uuid.uuid4()), draft["case_id"], "draft_" + state, dumps({"draft_id": draft_id, "kind": draft["kind"], "previous_body": draft["body"], "body": body, "previous_state": draft["state"]}), now()))
@@ -282,6 +305,68 @@ class Store:
                 title = ("Feedback manually submitted: " if state == "submitted_manually" else "Communication manually sent: ") + draft["title"]
                 db.execute("INSERT OR IGNORE INTO actions VALUES (?,?,?,?,?,'done',?,?,?,NULL)", ("draft:" + draft_id, draft["case_id"], title, self.settings.owner_name, None, "Engineer recorded this action manually. Workbench did not send or submit anything.", recorded, recorded))
             return dict(db.execute("SELECT * FROM drafts WHERE id=?", (draft_id,)).fetchone())
+
+    @staticmethod
+    def _draft_options(db, identifier):
+        row = db.execute('SELECT record FROM draft_options WHERE draft_id=?', (identifier,)).fetchone()
+        return json.loads(row[0]) if row else dict(variant='standard', scenario='update', use_when='', review_notes='')
+
+    def _save_writing_example(self, db, identifier, audience, body, label, reference):
+        from .writing import features
+        if len(body.strip()) < 40:
+            raise ValueError('Use at least 40 characters to teach writing style')
+        record = dict(id=identifier, audience=audience, body=body, features=features(body),
+                      origin='confirmed', source_label=label, source_reference=reference, author_email=self.settings.owner_email, updated_at=now())
+        db.execute('INSERT OR REPLACE INTO writing_examples VALUES (?,?,?,?)', (identifier, audience, dumps(record), record['updated_at']))
+
+    def _save_writing_observation(self, db, case_id, observation):
+        if observation.author_email.lower() != self.settings.owner_email.lower():
+            return
+        identifier = 'history:' + hashlib.sha256((case_id + observation.audience + ':'.join(sorted(observation.source_message_ids))).encode()).hexdigest()
+        forgotten = db.execute('SELECT value FROM kv WHERE key=?', ('forgotten_writing:' + identifier,)).fetchone()
+        if forgotten:
+            return
+        record = dict(id=identifier, audience=observation.audience, origin='historical',
+                      source_label='Attributed sent-message history (privacy summary)', source_reference=case_id,
+                      source_message_ids=observation.source_message_ids, author_email=observation.author_email,
+                      features=observation.model_dump(exclude={'audience', 'author_email', 'source_message_ids'}), updated_at=now())
+        db.execute('INSERT OR REPLACE INTO writing_examples VALUES (?,?,?,?)', (identifier, observation.audience, dumps(record), record['updated_at']))
+
+    def add_writing_example(self, example):
+        if not self.kv('writing_preferences', {'learning_enabled': True})['learning_enabled']:
+            raise ValueError('Writing style learning is paused')
+        identifier = hashlib.sha256((example.audience + ':' + example.body).encode()).hexdigest()
+        with self.connect() as db:
+            self._save_writing_example(db, identifier, example.audience, example.body, example.source_label, 'user_confirmed_example')
+        return identifier
+
+    def forget_writing_example(self, identifier):
+        with self.connect() as db:
+            if not db.execute('DELETE FROM writing_examples WHERE id=?', (identifier,)).rowcount:
+                raise KeyError('Writing example not found')
+            if identifier.startswith('history:'):
+                db.execute('INSERT OR REPLACE INTO kv VALUES (?,?)', ('forgotten_writing:' + identifier, dumps(True)))
+
+    def writing_style(self, for_worker=False):
+        from .writing import AUDIENCES, describe, historical_descriptions
+        prefs = self.kv('writing_preferences', {'learning_enabled': True, 'preferences': {}})
+        with self.connect() as db:
+            records = [json.loads(r[0]) for r in db.execute('SELECT record FROM writing_examples ORDER BY updated_at DESC')]
+        # Only this engineer's confirmed text is eligible. A worker's output or
+        # privacy summary cannot insert a sample through analysis ingestion.
+        records = [r for r in records if r['author_email'].lower() == self.settings.owner_email.lower()]
+        audiences = {}
+        for audience in AUDIENCES:
+            samples = [r for r in records if r['audience'] == audience and r.get('origin') != 'historical']
+            history = [r for r in records if r['audience'] == audience and r.get('origin') == 'historical']
+            audiences[audience] = dict(preferences=prefs['preferences'].get(audience, ''), sample_count=len(samples),
+                confidence='none' if not samples else 'limited' if len(samples) < 3 else 'developing',
+                observations=describe(samples) if not for_worker or prefs['learning_enabled'] else [],
+                historical_source_count=len(history), historical_observations=historical_descriptions(history) if not for_worker or prefs['learning_enabled'] else [])
+        result = dict(learning_enabled=prefs['learning_enabled'], audiences=audiences)
+        if not for_worker:
+            result['examples'] = [{k: v for k, v in r.items() if k not in {'body', 'features', 'author_email'}} | {'preview': r.get('body', 'Structural observations only; tentative attribution from privacy summaries.')[:160]} for r in records]
+        return result
 
     def add_action(self, case_id, action):
         if not self.case(case_id):

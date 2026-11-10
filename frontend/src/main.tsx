@@ -31,6 +31,7 @@ import type {
   Lesson,
   Overview,
   Outcome,
+  WritingStyle,
 } from "./types";
 import "./style.css";
 
@@ -68,6 +69,8 @@ const band = (value: number | null | undefined) =>
         ? "watch"
         : "attention";
 const tidy = (value: string) => value.replaceAll("_", " ");
+const audienceLabel = (value: string) =>
+  value.charAt(0).toUpperCase() + value.slice(1);
 function safeUrl(value: string | null | undefined) {
   try {
     const u = new URL(value || "");
@@ -298,22 +301,25 @@ function DraftEditor({
     [busy, setBusy] = useState(false);
   useEffect(() => setBody(draft.body), [draft.id, draft.body]);
   const stale = draft.state === "superseded";
-  async function update(state?: string) {
+  async function update(state?: string, learnStyle = false) {
     setBusy(true);
     try {
       await api("/drafts/" + draft.id, "PATCH", {
         body,
+        learn_style: learnStyle,
         ...(state ? { state } : {}),
       });
       await onChange();
       notify(
-        state === "copied"
-          ? "Copied. This does not mark it as sent."
-          : state === "manually_sent"
-            ? "Recorded as manually sent."
-            : state === "submitted_manually"
-              ? "Recorded as manually submitted."
-              : "Draft saved.",
+        learnStyle
+          ? "Draft saved. Your edit was added to your private writing profile."
+          : state === "copied"
+            ? "Copied. This does not mark it as sent."
+            : state === "manually_sent"
+              ? "Recorded as manually sent."
+              : state === "submitted_manually"
+                ? "Recorded as manually submitted."
+                : "Draft saved.",
       );
     } catch (e) {
       notify((e as Error).message);
@@ -327,11 +333,28 @@ function DraftEditor({
         <h3>{draft.title}</h3>
         <span className="pill">{tidy(draft.state)}</span>
       </div>
+      {draft.variant && draft.variant !== "standard" && (
+        <p className="draft-variant">
+          {draft.variant === "high_level" ? "High-level" : tidy(draft.variant)}{" "}
+          · {draft.scenario === "follow_up" ? "Follow-up" : "Update"}
+        </p>
+      )}
       {stale && (
         <p className="notice">
           This draft uses an older case version. Use a current draft before
           taking action.
         </p>
+      )}
+      {draft.use_when && (
+        <p className="notice">
+          <strong>Use when:</strong> {draft.use_when}
+        </p>
+      )}
+      {draft.review_notes && (
+        <details className="draft-review-notes">
+          <summary>Review notes — excluded from message</summary>
+          <p className="preserve">{draft.review_notes}</p>
+        </details>
       )}
       <textarea
         aria-label={draft.title}
@@ -344,6 +367,16 @@ function DraftEditor({
         <button disabled={busy || stale} onClick={() => update()}>
           Save draft
         </button>
+        {draft.kind !== "feedback" && (
+          <button
+            disabled={
+              busy || stale || body === draft.body || body.trim().length < 40
+            }
+            onClick={() => update(undefined, true)}
+          >
+            Save &amp; learn from my edit
+          </button>
+        )}
         <button disabled={busy || stale} onClick={() => update("reviewed")}>
           <Check size={14} />
           Mark reviewed
@@ -405,17 +438,27 @@ function CaseWorkspace({
   const [tab, setTab] = useState("brief"),
     [metric, setMetric] = useState<string | null>(null),
     [draftKind, setDraftKind] = useState("customer"),
+    [draftVariant, setDraftVariant] = useState("all"),
+    [draftScenario, setDraftScenario] = useState("update"),
     [showOld, setShowOld] = useState(false),
     [newAction, setNewAction] = useState("");
   useEffect(() => {
     setMetric(null);
     setTab("brief");
+    setDraftVariant("all");
+    setDraftScenario("update");
   }, [item.id]);
   const evaluation = item.evaluation,
     analysis = item.analysis,
     actions = item.actions.filter((a) => a.state === "proposed"),
     drafts = (item.drafts || []).filter(
-      (d) => d.kind === draftKind && (showOld || d.state !== "superseded"),
+      (d) =>
+        d.kind === draftKind &&
+        (showOld || d.state !== "superseded") &&
+        (draftKind === "feedback" ||
+          ((draftVariant === "all" ||
+            (d.variant || "standard") === draftVariant) &&
+            (d.scenario || "update") === draftScenario)),
     );
   const next = actions[0];
   return (
@@ -630,19 +673,17 @@ function CaseWorkspace({
           <>
             <div className="draft-switch">
               <div className="segmented">
-                {["customer", "internal", "feedback"].map((k) => (
-                  <button
-                    key={k}
-                    className={draftKind === k ? "active" : ""}
-                    onClick={() => setDraftKind(k)}
-                  >
-                    {k === "internal"
-                      ? "Engineering / internal"
-                      : k === "customer"
-                        ? "Customer"
-                        : "Feedback"}
-                  </button>
-                ))}
+                {["customer", "engineering", "internal", "feedback"].map(
+                  (k) => (
+                    <button
+                      key={k}
+                      className={draftKind === k ? "active" : ""}
+                      onClick={() => setDraftKind(k)}
+                    >
+                      {audienceLabel(k)}
+                    </button>
+                  ),
+                )}
               </div>
               <label>
                 <input
@@ -653,10 +694,40 @@ function CaseWorkspace({
                 Show superseded
               </label>
             </div>
+            {draftKind !== "feedback" && (
+              <div className="draft-filters">
+                <label>
+                  Message purpose
+                  <select
+                    aria-label="Message purpose"
+                    value={draftScenario}
+                    onChange={(e) => setDraftScenario(e.target.value)}
+                  >
+                    <option value="update">Update</option>
+                    <option value="follow_up">Follow-up</option>
+                  </select>
+                </label>
+                <label>
+                  Message length
+                  <select
+                    aria-label="Message length"
+                    value={draftVariant}
+                    onChange={(e) => setDraftVariant(e.target.value)}
+                  >
+                    <option value="all">All lengths</option>
+                    <option value="detailed">Detailed</option>
+                    <option value="concise">Concise</option>
+                    <option value="high_level">High-level</option>
+                    <option value="standard">Original</option>
+                  </select>
+                </label>
+              </div>
+            )}
             <p className="review-note">
               <ShieldCheck size={15} />
               Review and copy drafts here. Sending and feedback submission
-              happen manually in their source apps.
+              happen manually in their source apps. EPIC-A is reference
+              material; these options are written from the case evidence.
             </p>
             {drafts.length ? (
               drafts.map((d) => (
@@ -916,6 +987,226 @@ function Operations({
   );
 }
 
+function WritingPreferencesPanel({ notify }: { notify: (s: string) => void }) {
+  const [profile, setProfile] = useState<WritingStyle | null>(null),
+    [preferences, setPreferences] = useState<Record<string, string>>({}),
+    [enabled, setEnabled] = useState(true),
+    [audience, setAudience] = useState("customer"),
+    [body, setBody] = useState(""),
+    [sourceLabel, setSourceLabel] = useState("My sent message"),
+    [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    const p = await api<WritingStyle>("/writing-style");
+    setProfile(p);
+    setEnabled(p.learning_enabled);
+    setPreferences(
+      Object.fromEntries(
+        Object.entries(p.audiences).map(([k, v]) => [k, v.preferences]),
+      ),
+    );
+  }, []);
+  useEffect(() => {
+    load().catch((e) => notify(e.message));
+  }, [load, notify]);
+  async function change(action: () => Promise<unknown>, message: string) {
+    setBusy(true);
+    try {
+      await action();
+      await load();
+      notify(message);
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (!profile)
+    return (
+      <section>
+        <h2>Your writing style</h2>
+        <p>Loading your private writing profile…</p>
+      </section>
+    );
+  return (
+    <section className="writing-style">
+      <h2>Your writing style</h2>
+      <p>
+        Messages evolve from your own sent history, confirmed examples and
+        edits. Customer, engineering and internal preferences stay separate.
+        EPIC-A is reference material, not required wording.
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          change(
+            () =>
+              api("/writing-style", "PATCH", {
+                learning_enabled: enabled,
+                preferences,
+              }),
+            "Writing preferences saved.",
+          );
+        }}
+      >
+        <label className="writing-toggle">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          Use adaptive style learning
+        </label>
+        <p className="caption">
+          Pausing stops new learning and stops using learned observations in
+          future investigations. Your explicit preferences still apply. Existing
+          drafts are unchanged.
+        </p>
+        <div className="writing-audiences">
+          {Object.entries(profile.audiences).map(([key, p]) => (
+            <article key={key}>
+              <h3>{audienceLabel(key)}</h3>
+              <p className="caption">
+                {p.sample_count} confirmed examples ·{" "}
+                {p.confidence === "none"
+                  ? "No confirmed profile yet"
+                  : `${tidy(p.confidence)} profile`}
+              </p>
+              <label>
+                Preferences for {key}
+                <textarea
+                  aria-label={`Preferences for ${key}`}
+                  value={preferences[key] || ""}
+                  maxLength={5000}
+                  onChange={(e) =>
+                    setPreferences({ ...preferences, [key]: e.target.value })
+                  }
+                  placeholder="Tone, structure, openings, or phrases you prefer"
+                />
+              </label>
+              {p.observations.length > 0 && (
+                <ul>
+                  {p.observations.map((o) => (
+                    <li key={o}>{o}</li>
+                  ))}
+                </ul>
+              )}
+              {p.historical_observations.length > 0 && (
+                <details>
+                  <summary>
+                    Tentative patterns from sent history (
+                    {p.historical_source_count} source groups)
+                  </summary>
+                  <p className="caption">
+                    Attributed privacy summaries, not exact quotations. These
+                    are guidance with limited confidence.
+                  </p>
+                  <ul>
+                    {p.historical_observations.map((o) => (
+                      <li key={o}>{o}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </article>
+          ))}
+        </div>
+        <button className="primary" disabled={busy}>
+          Save writing preferences
+        </button>
+      </form>
+      <details className="writing-examples">
+        <summary>Teach with a message I wrote</summary>
+        <p className="caption">
+          Add your own sent text, or use “Save &amp; learn from my edit” on a
+          draft. Unchanged generated drafts, copied or reviewed text, and other
+          authors are not examples of your voice. Raw examples stay in this
+          private local store; workers receive structural observations.
+        </p>
+        <form
+          className="lesson-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            change(async () => {
+              await api("/writing-style/examples", "POST", {
+                audience,
+                body,
+                source_label: sourceLabel,
+              });
+              setBody("");
+            }, "Your example was added to your private writing profile.");
+          }}
+        >
+          <label>
+            Example audience
+            <select
+              value={audience}
+              onChange={(e) => setAudience(e.target.value)}
+            >
+              {["customer", "engineering", "internal"].map((a) => (
+                <option key={a} value={a}>
+                  {audienceLabel(a)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Example source label
+            <input
+              value={sourceLabel}
+              maxLength={300}
+              required
+              onChange={(e) => setSourceLabel(e.target.value)}
+            />
+          </label>
+          <label>
+            A message I wrote
+            <textarea
+              value={body}
+              minLength={40}
+              maxLength={30000}
+              required
+              onChange={(e) => setBody(e.target.value)}
+            />
+          </label>
+          <button disabled={busy || !profile.learning_enabled}>
+            Learn from my message
+          </button>
+        </form>
+      </details>
+      {profile.examples.length > 0 && (
+        <details className="writing-examples">
+          <summary>
+            Manage private examples and history ({profile.examples.length})
+          </summary>
+          {profile.examples.map((e) => (
+            <article key={e.id}>
+              <strong>
+                {audienceLabel(e.audience)} · {e.source_label}
+              </strong>
+              <p>{e.preview}</p>
+              <button
+                disabled={busy}
+                onClick={() =>
+                  change(
+                    () =>
+                      api(
+                        "/writing-style/examples/" + encodeURIComponent(e.id),
+                        "DELETE",
+                      ),
+                    "Writing example forgotten.",
+                  )
+                }
+              >
+                Forget example
+              </button>
+            </article>
+          ))}
+        </details>
+      )}
+    </section>
+  );
+}
+
 function Learning({
   cases,
   notify,
@@ -949,6 +1240,7 @@ function Learning({
           </p>
         </div>
       </div>
+      <WritingPreferencesPanel notify={notify} />
       <div className="learning-summary">
         <div>
           <strong>{cases.length}</strong>

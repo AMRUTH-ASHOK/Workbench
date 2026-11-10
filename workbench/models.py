@@ -150,10 +150,26 @@ class Coverage(Record):
 
 
 class DraftInput(Record):
-    kind: Literal["customer", "internal", "feedback"]
+    kind: Literal["customer", "engineering", "internal", "feedback"]
     title: str
     body: str
+    variant: Literal["standard", "detailed", "concise", "high_level"] = "standard"
+    scenario: Literal["update", "follow_up"] = "update"
+    use_when: str = ""
+    review_notes: str = ""
     evidence: list[Evidence] = Field(default_factory=list)
+
+
+class WritingObservation(Record):
+    """Attributed, structural observations; never message bodies or case facts."""
+    audience: Literal["customer", "engineering", "internal"]
+    author_email: str
+    source_message_ids: list[str] = Field(min_length=1, max_length=30)
+    greeting: Literal["hi", "hello", "dear"] | None = None
+    good_day: bool = False
+    closing: Literal["best regards", "kind regards", "regards", "thanks", "thank you"] | None = None
+    structure: list[Literal["numbered_issues", "observations_recommendations", "direct_reference", "short_specific_ask"]] = Field(default_factory=list)
+    acknowledges_early: bool = False
 
 
 class Analysis(Record):
@@ -168,6 +184,7 @@ class Analysis(Record):
     drafts: list[DraftInput] = Field(default_factory=list)
     coverage: list[Coverage] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
+    writing_observations: list[WritingObservation] = Field(default_factory=list)
 
     @field_validator("next_actions", mode="before")
     @classmethod
@@ -193,6 +210,25 @@ class Analysis(Record):
 class DraftPatch(Record):
     body: str | None = Field(default=None, max_length=100000)
     state: Literal["draft", "reviewed", "copied", "manually_sent", "submitted_manually"] | None = None
+    learn_style: bool = False
+
+
+class WritingPreferences(Record):
+    learning_enabled: bool = True
+    preferences: dict[Literal["customer", "engineering", "internal"], str] = Field(default_factory=dict)
+
+    @field_validator("preferences")
+    @classmethod
+    def bounded_preferences(cls, value):
+        if any(len(text) > 5000 for text in value.values()):
+            raise ValueError("Writing preferences must be at most 5000 characters per audience")
+        return value
+
+
+class WritingExample(Record):
+    audience: Literal["customer", "engineering", "internal"]
+    body: str = Field(min_length=40, max_length=30000)
+    source_label: str = Field(default="My sent message", min_length=1, max_length=300)
 
 
 class ActionInput(Record):
