@@ -123,7 +123,8 @@ def run(job_path):
             stop_interactive(proc)
         else:
             with open(directory/"response.json", "wb") as output:
-                proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=output, stderr=log, cwd=str(Path.home()/"universe"), start_new_session=True)
+                working_directory = directory if job.get('mode') == 'operational' else Path.home()/"universe"
+                proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=output, stderr=log, cwd=str(working_directory), start_new_session=True)
                 try:
                     proc.communicate(job["prompt"].encode(), timeout=job.get("timeout", 1500))
                 except subprocess.TimeoutExpired:
@@ -133,7 +134,7 @@ def run(job_path):
                     except subprocess.TimeoutExpired:
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
-                    raise TimeoutError("Operational drafting exceeded its 3-minute model budget" if job.get('mode') == 'operational' else "Case worker exceeded its 25-minute deadline")
+                    raise TimeoutError("Operational drafting exceeded its bounded model budget" if job.get('mode') == 'operational' else "Case worker exceeded its 25-minute deadline")
             result = json.loads((directory/"response.json").read_text())
             if isinstance(result, list):
                 result = next((r for r in reversed(result) if r.get("type") == "result"), {})

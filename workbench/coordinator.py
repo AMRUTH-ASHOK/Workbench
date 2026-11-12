@@ -201,7 +201,7 @@ class Coordinator:
                 source_revision=case['revision'],case_id=case['id'],case_number=case['number'],
                 case_updated_at=case['updated_at'],owner_name=self.settings.owner_name,
                 instructions=instructions,prompt='Consolidate the supplied source activity and write the operational brief and complete message options.',
-                linked_evidence=analysis.get('evidence',[])[:15],schema=Analysis.model_json_schema(),timeout=180)
+                linked_evidence=analysis.get('evidence',[])[:15],schema=Analysis.model_json_schema(),timeout=300)
             if same:
                 cached = self.store.case(case['id']).get('operational_context')
                 if cached and cached.get('source_revision') == case['revision'] and cached.get('source_validation') == 'verified':
@@ -440,7 +440,7 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
                 self.store.set_kv('needs_inventory_refresh', True)
             if status["state"] == "working":
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(status["started_at"])).total_seconds()
-                if age > (540 if worker.get('mode')=='operational' else 1650):
+                if age > (660 if worker.get('mode')=='operational' else 1650):
                     raise TimeoutError("Worker stopped reporting within its deadline")
                 return
             audit = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/tool-audit.jsonl 2>/dev/null || true", timeout=15)
@@ -488,7 +488,7 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
         except Exception as exc:
             from datetime import timedelta
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(worker["started_at"])).total_seconds()
-            if isinstance(exc, (subprocess.TimeoutExpired, RuntimeError)) and age < (540 if worker.get('mode')=='operational' else 1650):
+            if isinstance(exc, (subprocess.TimeoutExpired, RuntimeError)) and age < (660 if worker.get('mode')=='operational' else 1650):
                 # An SSH/export interruption does not terminate the remote process.
                 # Keep polling the same job rather than stranding its eventual result.
                 worker.update(error="Export temporarily unavailable; retrying the same job. " + str(exc)[:1000])

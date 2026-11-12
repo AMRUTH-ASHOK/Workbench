@@ -52,7 +52,7 @@ sent actions and attributed writing preferences can appear independently. Privac
 summaries remain documents, never confirmed verbatim writing examples. Ambiguous
 attribution and Slack IDs alone do not teach writing style.
 
-Noninteractive Isaac has a 180-second drafting budget and a strict operational
+Noninteractive Isaac has a 300-second drafting budget and a strict operational
 tool gate: own result files and structured output only. It cannot run skills,
 agents, enrichment, SQL or diagnostic tools. Each audience/purpose needs three
 distinct lengths (plus follow-up conditions) or an explicit no-message decision.

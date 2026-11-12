@@ -31,8 +31,8 @@ expiry. The dashboard reports the affected stage and permits a manual resume.
 It cannot collect or notify while the Mac is powered off or offline.
 
 Operational source collection is bounded to 180 seconds and model drafting to
-180 seconds, plus final live validation and transport overhead. The coordinator
-marks a non-reporting operational job failed after nine minutes. It allows up
+300 seconds, plus final live validation and transport overhead. The coordinator
+marks a non-reporting operational job failed after eleven minutes. It allows up
 to three attempts per window/source revision with a five-minute cooldown, and
 one repair for an incomplete message matrix. Optional investigation and analytics
 retain their longer deadlines. A failed worker receives a retry cooldown. Source queries
