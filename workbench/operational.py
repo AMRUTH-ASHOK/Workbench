@@ -13,7 +13,7 @@ def guard_commitments(analysis):
     for draft in report.drafts:
         if draft.kind == 'feedback':
             continue
-        body, removed = re.subn(r'(?im)^\s*next (?:scheduled )?update (?:by|on|at)\b[^\n]*(?:\n|$)', '', draft.body)
+        body, removed = re.subn(r'(?im)^[^\n]*\bnext (?:scheduled )?update (?:by|on|at)\b[^\n]*(?:\n|$)', '', draft.body)
         if removed:
             draft.body = body.strip()
             note = 'A generated next-update calendar promise was omitted. Choose any new commitment yourself; existing sourced commitments belong in the case brief.'

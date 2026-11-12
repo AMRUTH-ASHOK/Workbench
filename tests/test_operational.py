@@ -339,10 +339,10 @@ def test_model_retry_reuses_dated_context_only_after_fresh_live_validation(tmp_p
 
 def test_generated_calendar_promise_is_removed_without_erasing_release_facts(store):
     store.ingest(bundle())
-    a=analysis(mode='operational',drafts=[dict(kind='customer',title='Status update',body='The build entered validation on November 10. We are awaiting release confirmation.\n\nNext update by Monday, November 16, 2026, 5:00 PM IST.\n\nBest regards')])
+    a=analysis(mode='operational',drafts=[dict(kind='customer',title='Status update',body="The build entered validation on November 10. We are awaiting release confirmation.\n\nNext update by Monday, November 16, 2026, 5:00 PM IST.\nI'll send the next update by Monday, November 16, or sooner if the rollout changes.\n\nBest regards")])
     store.ingest_analysis(a)
     draft=store.case(CASE_ID)['drafts'][0]
-    assert 'Next update by' not in draft['body'] and 'November 10' in draft['body']
+    assert 'next update by' not in draft['body'].lower() and 'November 10' in draft['body']
     assert 'calendar promise was omitted' in draft['review_notes']
     assert 'Next update by' in a.drafts[0].body
     store.patch_draft(draft['id'],DraftPatch(body='My reviewed wording with my own agreed checkpoint.'))
