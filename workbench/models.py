@@ -157,6 +157,7 @@ class DraftInput(Record):
     scenario: Literal["update", "follow_up"] = "update"
     use_when: str = ""
     review_notes: str = ""
+    completes_actions: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
 
 
@@ -185,6 +186,12 @@ class Analysis(Record):
     coverage: list[Coverage] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
     writing_observations: list[WritingObservation] = Field(default_factory=list)
+    mode: Literal["investigation", "operational"] = "investigation"
+    # Every audience/purpose needs either three lengths or a specific reason.
+    message_decisions: dict[str, str] = Field(default_factory=dict)
+    completed_work: list[str] = Field(default_factory=list)
+    latest_update: str = ""
+    blocker: str = ""
 
     @field_validator("next_actions", mode="before")
     @classmethod

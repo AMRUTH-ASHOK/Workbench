@@ -59,6 +59,8 @@ def main():
     analysis.add_argument("path")
     launch = commands.add_parser("analyze")
     launch.add_argument("case_number")
+    investigate = commands.add_parser('investigate', help='Explicit optional Support Agent technical investigation')
+    investigate.add_argument('case_number')
     args = parser.parse_args()
     settings = get_settings()
     store = Store(settings)
@@ -88,7 +90,7 @@ def main():
         elif args.command == "harvest":
             coordinator.harvest()
             print("Worker results checked")
-        elif args.command == "analyze":
+        elif args.command in {"analyze", "investigate"}:
             case = next((c for c in store.cases() if c["number"] == args.case_number), None)
             if not case:
                 parser.error("Case is not in the active assigned queue; collect first")
@@ -96,7 +98,8 @@ def main():
             if existing and existing.get("state") in {"working", "starting"}:
                 print(json.dumps({"state": "already_running"}))
             else:
-                print(json.dumps(coordinator.launch_case(case, "manual-" + __import__("uuid").uuid4().hex)))
+                launch = coordinator.launch_case if args.command == 'investigate' else coordinator.launch_operational
+                print(json.dumps(launch(case, "manual-" + __import__("uuid").uuid4().hex)))
         elif args.command == "doctor":
             print(json.dumps({"data_dir": str(settings.data_dir), "database": settings.db_path.exists(), "arcaterm": coordinator.arca("status"), "frontend": (ROOT/"frontend/dist/index.html").exists()}, indent=2))
 

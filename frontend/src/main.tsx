@@ -29,6 +29,7 @@ import type {
   Evaluation,
   Evidence,
   Lesson,
+  LearningOutcomes,
   Overview,
   Outcome,
   WritingStyle,
@@ -300,7 +301,7 @@ function DraftEditor({
   const [body, setBody] = useState(draft.body),
     [busy, setBusy] = useState(false);
   useEffect(() => setBody(draft.body), [draft.id, draft.body]);
-  const stale = draft.state === "superseded";
+  const stale = draft.state === "superseded" || draft.is_current === false;
   async function update(state?: string, learnStyle = false) {
     setBusy(true);
     try {
@@ -454,13 +455,16 @@ function CaseWorkspace({
     drafts = (item.drafts || []).filter(
       (d) =>
         d.kind === draftKind &&
-        (showOld || d.state !== "superseded") &&
+        (showOld || (d.state !== "superseded" && d.is_current !== false)) &&
         (draftKind === "feedback" ||
           ((draftVariant === "all" ||
             (d.variant || "standard") === draftVariant) &&
             (d.scenario || "update") === draftScenario)),
     );
   const next = actions[0];
+  const draftCoverage = item.draft_coverage?.cells.find(
+    (c) => c.audience === draftKind && c.purpose === draftScenario,
+  );
   return (
     <main className="case-workspace">
       <button className="mobile-back text-button" onClick={onBack}>
@@ -615,6 +619,51 @@ function CaseWorkspace({
       <div className="tab-body">
         {tab === "brief" && (
           <>
+            <p className="notice">
+              Desk: {item.desk_state || "incomplete"}.{" "}
+              {item.desk_error ||
+                "Activity and messages refresh independently of official scores."}
+            </p>
+            {item.operational_context && (
+              <details
+                className="source-activity"
+                open={!analysis || item.analysis_stale}
+              >
+                <summary>
+                  Recent source activity · checked{" "}
+                  {date(item.operational_context.observed_at, true)}
+                </summary>
+                {item.operational_context.source_revision !== item.revision && (
+                  <p className="notice">
+                    Earlier activity snapshot; current source collection is
+                    pending.
+                  </p>
+                )}
+                {item.operational_context.messages
+                  .slice(0, 12)
+                  .map((message) => (
+                    <article key={message.id}>
+                      <strong>
+                        {message.author_name || "Source author"} ·{" "}
+                        {audienceLabel(message.audience)}
+                      </strong>
+                      <small> · {date(message.created_at, true)}</small>
+                      <p className="preserve">{message.body}</p>
+                    </article>
+                  ))}
+                {item.operational_context.documents.map((document, i) => (
+                  <details key={i}>
+                    <summary>{document.source}</summary>
+                    <p className="preserve">{document.text}</p>
+                  </details>
+                ))}
+                {item.operational_context.gaps.map((gap, i) => (
+                  <p className="caption" key={i}>
+                    {gap}
+                  </p>
+                ))}
+              </details>
+            )}
             {item.analysis_stale && analysis && (
               <p className="notice">
                 The case has changed since this analysis. Updated guidance is
@@ -626,7 +675,29 @@ function CaseWorkspace({
                 <section className="brief-summary">
                   <h3>Where things stand</h3>
                   <p className="preserve">{analysis.summary}</p>
+                  {analysis.latest_update && (
+                    <p>
+                      <strong>Latest update: </strong>
+                      {analysis.latest_update}
+                    </p>
+                  )}
+                  {analysis.blocker && (
+                    <p>
+                      <strong>Waiting on: </strong>
+                      {analysis.blocker}
+                    </p>
+                  )}
                 </section>
+                {!!analysis.completed_work?.length && (
+                  <section>
+                    <h3>Already done</h3>
+                    <ul>
+                      {analysis.completed_work.map((work, i) => (
+                        <li key={i}>{work}</li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
                 {analysis.concerns.length > 0 && (
                   <section>
                     <h3>What needs attention</h3>
@@ -660,7 +731,7 @@ function CaseWorkspace({
               <Empty
                 icon={<FileText />}
                 title="The case is in your queue"
-                text="Its investigation and communication drafts will appear when the worker finishes. Official scores can arrive independently."
+                text="Recent activity appears as it is collected. The operational brief and message options are prepared separately from investigations and official scores."
               />
             )}
             <div className="source-footer">
@@ -729,6 +800,19 @@ function CaseWorkspace({
               happen manually in their source apps. EPIC-A is reference
               material; these options are written from the case evidence.
             </p>
+            {draftCoverage && (
+              <p
+                className={
+                  draftCoverage.state === "incomplete" ? "notice" : "caption"
+                }
+              >
+                {draftCoverage.state === "not_needed"
+                  ? `No message needed: ${draftCoverage.reason}`
+                  : draftCoverage.state === "ready"
+                    ? "All three lengths are available."
+                    : `Coverage incomplete: ${draftCoverage.missing.join(", ")}. ${item.desk_state === "refreshing" ? "Preparing updated options." : item.desk_error || "A bounded repair will be attempted; see Operations for progress."}`}
+              </p>
+            )}
             {drafts.length ? (
               drafts.map((d) => (
                 <DraftEditor
@@ -741,8 +825,21 @@ function CaseWorkspace({
             ) : (
               <Empty
                 icon={<FileText />}
-                title="No current draft in this category"
-                text="A draft is prepared when the case evidence supports a useful communication or feedback item."
+                title={
+                  draftCoverage?.state === "not_needed"
+                    ? "No message needed"
+                    : item.desk_state === "failed"
+                      ? "Draft generation failed"
+                      : item.desk_state === "refreshing"
+                        ? "Updated options are being prepared"
+                        : "Draft options are incomplete"
+                }
+                text={
+                  draftCoverage?.state === "not_needed"
+                    ? draftCoverage.reason
+                    : item.desk_error ||
+                      "This is a readiness gap, not a decision that nothing should be sent. Check Operations for progress. Earlier drafts remain available under Show superseded for reference."
+                }
               />
             )}
           </>
@@ -889,6 +986,21 @@ function Operations({
           Resume / refresh
         </button>
       </div>
+      {overview?.workflow && (
+        <section className="schedule-panel">
+          <h3>Operational desk readiness</h3>
+          <p>
+            {overview.workflow.ready}/{overview.workflow.total} cases complete ·{" "}
+            {overview.workflow.with_drafts} with current drafts ·{" "}
+            {overview.workflow.refreshing} refreshing ·{" "}
+            {overview.workflow.failed} failed.
+          </p>
+          <p>
+            Consolidation and message options run by default. Technical
+            investigation is optional. Official scores collect independently.
+          </p>
+        </section>
+      )}
       <section className="schedule-panel">
         <h3>Your working rhythm</h3>
         <div className="schedule-times">
@@ -960,7 +1072,8 @@ function Operations({
           </div>
         ) : (
           <p className="muted">
-            Workers are created when a case needs investigation.
+            Case workers consolidate existing activity and prepare drafts.
+            Optional investigations use an explicit command.
           </p>
         )}
       </section>
@@ -1058,8 +1171,8 @@ function WritingPreferencesPanel({ notify }: { notify: (s: string) => void }) {
         </label>
         <p className="caption">
           Pausing stops new learning and stops using learned observations in
-          future investigations. Your explicit preferences still apply. Existing
-          drafts are unchanged.
+          future drafts. Your explicit preferences still apply. Existing drafts
+          are unchanged.
         </p>
         <div className="writing-audiences">
           {Object.entries(profile.audiences).map(([key, p]) => (
@@ -1215,14 +1328,19 @@ function Learning({
   notify: (s: string) => void;
 }) {
   const [lessons, setLessons] = useState<Lesson[]>([]),
+    [outcomes, setOutcomes] = useState<LearningOutcomes | null>(null),
     [title, setTitle] = useState(""),
     [lesson, setLesson] = useState(""),
     [limits, setLimits] = useState(""),
     [support, setSupport] = useState("");
-  const load = useCallback(
-    async () => setLessons(await api<Lesson[]>("/lessons")),
-    [],
-  );
+  const load = useCallback(async () => {
+    const [nextLessons, nextOutcomes] = await Promise.all([
+      api<Lesson[]>("/lessons"),
+      api<LearningOutcomes>("/learning-outcomes"),
+    ]);
+    setLessons(nextLessons);
+    setOutcomes(nextOutcomes);
+  }, []);
   useEffect(() => {
     load().catch((e) => notify(e.message));
   }, [load, notify]);
@@ -1241,6 +1359,39 @@ function Learning({
         </div>
       </div>
       <WritingPreferencesPanel notify={notify} />
+      <section className="schedule-panel">
+        <h2>Learning from actual activity</h2>
+        <p>
+          Your attributed sent messages are matched with earlier drafts where
+          possible. Original and edited wording contributes to the relevant
+          audience's private style profile; unchanged generated text is
+          excluded.
+        </p>
+        {outcomes && (
+          <>
+            <p>
+              {outcomes.recorded_actions} observed or recorded actions ·{" "}
+              {outcomes.comparable_outcomes} with comparable later evaluations ·{" "}
+              {outcomes.waiting_for_comparable_evaluation} awaiting comparable
+              evidence.
+            </p>
+            {outcomes.observations.map((observation, i) => (
+              <p key={i}>
+                {audienceLabel(observation.audience)} ·{" "}
+                {labels[observation.metric] || observation.metric}:{" "}
+                {observation.mean_change > 0 ? "+" : ""}
+                {score(observation.mean_change)} across{" "}
+                {observation.sample_count} observations (
+                {observation.confidence}). {observation.guidance}
+              </p>
+            ))}
+            <p className="caption">
+              {outcomes.limitations} These observations inform future drafts;
+              playbook rules still require your review.
+            </p>
+          </>
+        )}
+      </section>
       <div className="learning-summary">
         <div>
           <strong>{cases.length}</strong>
@@ -1669,11 +1820,12 @@ function App() {
                             <FileText size={12} />
                             {c.draft_count} drafts
                           </>
-                        ) : c.analysis ? (
-                          "Analysis ready"
                         ) : (
-                          "Analysis pending"
+                          `Desk ${c.desk_state || "incomplete"}`
                         )}
+                        {c.draft_count > 0 &&
+                          c.desk_state !== "ready" &&
+                          ` · ${c.desk_state || "incomplete"}`}
                       </span>
                     </div>
                   </button>

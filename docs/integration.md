@@ -12,7 +12,10 @@
 - **Closed scores:** `main.eng_support_ops_efficiency.enriched_cases`.
 - **Revisions:** `main.eng_support_ops_efficiency.case_enrichment_results`.
 - **Official usage:** `main.eng_support_ops_efficiency.support_agent_skill_invocations`.
-- **Case evidence/diagnostics:** existing Support Agent and related read MCPs.
+- **Operational case activity:** latest 60 Support Agent comments, at most three
+  explicitly referenced Jira issues and two explicitly linked Slack threads.
+  Optional-source errors become visible gaps; no broad investigation is launched.
+- **Optional diagnostics:** explicit `workbench investigate` only.
 - **Watchtower:** Product Supportability remains the inspected UI reference.
   Stored source data is preferred over browser scraping for scheduled collection.
 
@@ -27,8 +30,12 @@ workspace-login flows. Each environment can still encounter managed credential
 expiry. The dashboard reports the affected stage and permits a manual resume.
 It cannot collect or notify while the Mac is powered off or offline.
 
-Collection and case workers are bounded to approximately 25 minutes. A failed
-worker receives a retry cooldown rather than an immediate loop. Source queries
+Operational source collection is bounded to 180 seconds and model drafting to
+180 seconds, plus final live validation and transport overhead. The coordinator
+marks a non-reporting operational job failed after nine minutes. It allows up
+to three attempts per window/source revision with a five-minute cooldown, and
+one repair for an incomplete message matrix. Optional investigation and analytics
+retain their longer deadlines. A failed worker receives a retry cooldown. Source queries
 and source schemas can change upstream; failures are visible rather than replaced
 by invented scores. A serving-view timeout can fall back to retained ledger history.
 
@@ -36,6 +43,12 @@ The daily learning pass proposes descriptive review items. It does not invent a
 causal explanation, promote a lesson automatically, or rewrite trusted project
 instructions. Human-marked sent/submitted states are evidence of the engineer's
 recorded action; the system does not claim to have sent or verified delivery.
+Structured attributed posts automatically reconcile matching drafts and use the
+source post time. Exact generated text, summarized prose, other authors and
+explicitly AI-generated documents are excluded from confirmed style examples.
+Linked engineering activity remains evidence even when author identity cannot
+be reliably resolved. Engineering style learns only from structured comments with
+an explicit author email or confirmed manual examples.
 
 `/support-agent:start` is user-invocable and disables model invocation. It must
 enter through the interactive CLI as a user command. A dispatched slash command

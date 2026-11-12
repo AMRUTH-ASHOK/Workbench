@@ -135,7 +135,7 @@ class Coordinator:
         worker = self.ensure_worker("collector", "collector")
         self.install_remote(worker, ["mcp_client.py", "collector.py"])
         remote_dir = "~/workbench-runtime/collection-" + run_id
-        request = dict(run_id=run_id, owner_email=self.settings.owner_email, owner_name=self.settings.owner_name, closed_review=closed_review)
+        request = dict(run_id=run_id, owner_email=self.settings.owner_email, owner_name=self.settings.owner_name, closed_review=closed_review, inventory_only=True)
         self.ssh(worker["host"], "mkdir -p -m 700 " + remote_dir + "; cat > " + remote_dir + "/request.json", json.dumps(request).encode())
         # Keep the SSH command bounded and poll exported checkpoints independently.
         command = "python3.10 ~/workbench-runtime/collector.py " + remote_dir + "/request.json > " + remote_dir + "/collect.log 2>&1; echo $? > " + remote_dir + "/exit-code"
@@ -182,6 +182,120 @@ class Coordinator:
             if not retry_due and (stale or action_due or evaluation_changed or intake_missing):
                 due.append(case)
         return due
+
+    def launch_operational(self, case, run_id):
+        from .operational import prompt, coverage
+        with run_lock(self.settings.data_dir / ('case-' + case['id'] + '.lock')):
+            previous = self.store.worker(case['id']) or {}
+            if previous.get('state') in {'working','starting'}:
+                return previous
+            worker = self.ensure_worker(case['id'],'case',case['number'])
+            self.install_remote(worker,['worker_runner.py','worker_policy.py','mcp_client.py','collector.py','desk_context.py'])
+            epoch=self.store.kv('operational_window',case['observed_at'])
+            same = previous.get('mode') == 'operational' and previous.get('requested_at') == epoch and previous.get('source_revision')==case['revision']
+            analysis = case.get('analysis') or {}
+            repair = coverage(analysis) if same and analysis.get('mode') == 'operational' and not case['analysis_stale'] else None
+            job_id = str(uuid.uuid4()); remote_dir = '~/workbench-runtime/job-' + job_id
+            instructions = prompt(case,self.store.writing_style(for_worker=True),[l for l in self.store.lessons() if l['state']=='approved'],self.store.learning_outcomes(),repair)
+            job = dict(job_id=job_id,mode='operational',dispatch_mode='structured',run_id=run_id,
+                source_revision=case['revision'],case_id=case['id'],case_number=case['number'],
+                case_updated_at=case['updated_at'],owner_name=self.settings.owner_name,
+                instructions=instructions,prompt='Consolidate the supplied source activity and write the operational brief and complete message options.',
+                linked_evidence=analysis.get('evidence',[])[:15],schema=Analysis.model_json_schema(),timeout=180)
+            if same:
+                cached = self.store.case(case['id']).get('operational_context')
+                if cached and cached.get('source_revision') == case['revision'] and cached.get('source_validation') == 'verified':
+                    job['cached_context'] = cached
+            self.ssh(worker['host'],'mkdir -p -m 700 '+remote_dir+'; cat > '+remote_dir+'/job.json',json.dumps(job).encode())
+            # Retain infrastructure identities, not a previous job's success fields.
+            worker = {k:worker[k] for k in ('key','role','arclet_id','host','tab_id','name','request_id') if k in worker}
+            worker.update(mode='operational',state='working',case_id=case['id'],job_id=job_id,job_dir=remote_dir,
+                run_id=run_id,source_revision=case['revision'],started_at=now(),requested_at=epoch,
+                attempts=previous.get('attempts',0)+1 if same else 1,
+                repair_count=previous.get('repair_count',0)+(1 if repair and not repair['complete'] else 0) if same else 0,
+                error=None,retry_after='')
+            self.store.worker(case['id'],worker)
+            command='python3.10 ~/workbench-runtime/worker_runner.py '+remote_dir+'/job.json > '+remote_dir+'/runner.log 2>&1'
+            try:
+                self.ssh(worker['host'],'nohup sh -c '+shlex.quote(command)+' > /dev/null 2>&1 < /dev/null &')
+            except Exception as exc:
+                worker.update(error='Dispatch acknowledgement unavailable; checking this same job before any retry. '+str(exc)[:400])
+                self.store.worker(case['id'],worker)
+            return worker
+
+    def consolidate_due(self):
+        """Bounded retries/one coverage repair; never schedule investigations."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with run_lock(self.settings.data_dir/'operational-dispatch.lock'):
+            due=[]
+            for case in self.store.cases():
+                w=self.store.worker(case['id']) or {}
+                if w.get('state') in {'working','starting'}:
+                    continue
+                same=w.get('mode')=='operational' and w.get('requested_at')==self.store.kv('operational_window',case['observed_at']) and w.get('source_revision')==case['revision']
+                if same and (w.get('retry_after') or '')>now():
+                    continue
+                if same and (w.get('attempts',0)>=3 or (not case['analysis_stale'] and (case['analysis'] or {}).get('mode')=='operational' and (case['draft_coverage']['complete'] or w.get('repair_count',0)>=1))):
+                    continue
+                due.append(case)
+            launched=[];failures=[]
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures={pool.submit(self.launch_operational,c,'desk-'+uuid.uuid4().hex):c for c in due}
+                for f in as_completed(futures):
+                    try:
+                        launched.append(f.result())
+                    except Exception as exc:
+                        failures.append(futures[f]['number']+': '+str(exc)[:300])
+                        # Pre-dispatch failures need backoff too.
+                        from datetime import timedelta
+                        c=futures[f];w=self.store.worker(c['id']) or {}
+                        if w.get('state')!='working':
+                            epoch=self.store.kv('operational_window',c['observed_at'])
+                            same=w.get('mode')=='operational' and w.get('requested_at')==epoch and w.get('source_revision')==c['revision']
+                            w.update(state='failed',mode='operational',source_revision=c['revision'],requested_at=epoch,attempts=w.get('attempts',0)+1 if same else 1,error=str(exc)[:800],retry_after=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat())
+                            self.store.worker(c['id'],w)
+            if due:
+                self.store.source('operational_drafting','partial' if failures else 'checking',f'{len(launched)} consolidation/drafting jobs started; no intake or diagnostics. '+ ' '.join(failures))
+            return launched,failures
+
+    def start_scores(self, run_id, cases, closed_review):
+        with run_lock(self.settings.data_dir/'scores-dispatch.lock'):
+            existing=self.store.worker('score-collector')
+            if existing and existing.get('state')=='working':
+                return existing
+            w=self.ensure_worker('score-collector','scores')
+            self.install_remote(w,['mcp_client.py','collector.py'])
+            remote_dir='~/workbench-runtime/scores-'+run_id
+            request=dict(run_id=run_id,owner_email=self.settings.owner_email,owner_name=self.settings.owner_name,
+                score_cases=[c.model_dump() for c in cases],closed_review=False)
+            self.ssh(w['host'],'mkdir -p -m 700 '+remote_dir+'; cat > '+remote_dir+'/request.json',json.dumps(request).encode())
+            w.update(state='working',job_dir=remote_dir,run_id=run_id,started_at=now(),closed_review=closed_review,error=None,last_hash=None)
+            self.store.worker('score-collector',w)
+            command='python3.10 ~/workbench-runtime/collector.py '+remote_dir+'/request.json > '+remote_dir+'/collect.log 2>&1; echo $? > '+remote_dir+'/exit-code'
+            self.ssh(w['host'],'nohup sh -c '+shlex.quote(command)+' > /dev/null 2>&1 < /dev/null &')
+            self.store.source('scores','checking','Official evaluations are collecting separately; case activity and drafts do not wait for them.')
+            return w
+
+    def harvest_scores(self, worker):
+        try:
+            raw=self.ssh(worker['host'],'cat '+worker['job_dir']+'/bundle.json',timeout=15)
+            digest=hashlib.sha256(raw).hexdigest()
+            bundle=Bundle.model_validate_json(raw)
+            if digest!=worker.get('last_hash'):
+                self.store.ingest_scores(bundle);worker['last_hash']=digest
+            done=self.ssh(worker['host'],'test -f '+worker['job_dir']+'/exit-code && cat '+worker['job_dir']+'/exit-code || true',timeout=10).decode().strip()
+            if done:
+                worker.update(state='complete' if done=='0' else 'failed',finished_at=now(),error=None if done=='0' else 'Score collector failed; prior evaluations retained')
+                if done=='0' and worker.get('closed_review'):
+                    self.closed_learning(bundle)
+            elif (datetime.now(timezone.utc)-datetime.fromisoformat(worker['started_at'])).total_seconds()>1650:
+                worker.update(state='failed',error='Score collection exceeded its deadline; existing dated scores retained')
+        except Exception as exc:
+            worker['error']='Score export pending: '+str(exc)[:500]
+            if (datetime.now(timezone.utc)-datetime.fromisoformat(worker['started_at'])).total_seconds()>1650:
+                worker['state']='failed'
+                self.store.source('scores','unavailable',worker['error'])
+        self.store.worker('score-collector',worker)
 
     def start_terminal(self, worker, remote_dir, case_number):
         # SSH may work before a resumed tab has a live terminal surface. Wait
@@ -277,7 +391,17 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
 
     def harvest(self):
         with run_lock(self.settings.data_dir / "harvest.lock"):
-            for observed in self.store.overview()["workers"]:
+            # Publish activity before polling optional, potentially slow analytics.
+            for observed in sorted(self.store.overview()["workers"], key=lambda w: w.get('role') == 'scores'):
+                if observed.get('role') == 'scores' and observed.get('state') == 'working':
+                    try:
+                        with run_lock(self.settings.data_dir/'scores-dispatch.lock'):
+                            current = self.store.worker(observed['key'])
+                            if current and current.get('state') == 'working':
+                                self.harvest_scores(current)
+                    except AlreadyRunning:
+                        pass
+                    continue
                 if observed.get("role") != "case":
                     continue
                 try:
@@ -286,6 +410,10 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
                 except AlreadyRunning:
                     # Launch owns the same lock until terminal dispatch settles.
                     continue
+            workflow = self.store.overview().get('workflow')
+            if workflow:
+                self.store.source('operational_drafting', 'ready' if workflow['ready'] == workflow['total'] else 'partial' if workflow['failed'] else 'checking',
+                    f"{workflow['ready']}/{workflow['total']} cases have complete message coverage or explicit no-message decisions; {workflow['refreshing']} refreshing; {workflow['failed']} failed. Activity and messages do not wait for official scores.")
 
     def harvest_case(self, key):
         # Re-read after acquiring the case lock; the inventory snapshot may
@@ -294,13 +422,25 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
         if not worker or worker.get("role") != "case" or worker.get("state") != "working":
             return
         try:
+            if worker.get('mode') == 'operational' and not worker.get('context_imported'):
+                raw_context=self.ssh(worker['host'],'test -f '+worker['job_dir']+'/context.json && cat '+worker['job_dir']+'/context.json || true',timeout=12)
+                if raw_context.strip():
+                    context=json.loads(raw_context)
+                    if context.get('source_validation')=='verified':
+                        self.store.ingest_context(context)
+                    elif context.get('source_validation') == 'changed':
+                        self.store.set_kv('needs_inventory_refresh',True)
+                    worker['context_imported']=True
+                    self.store.worker(key,worker)
             status_raw = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/status.json", timeout=15)
             status = json.loads(status_raw)
             if status.get("job_id") != worker["job_id"] or status.get("case_id") != worker["case_id"]:
                 raise ValueError("Worker result identity mismatch")
+            if status.get('source_validation') == 'changed':
+                self.store.set_kv('needs_inventory_refresh', True)
             if status["state"] == "working":
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(status["started_at"])).total_seconds()
-                if age > 1650:
+                if age > (540 if worker.get('mode')=='operational' else 1650):
                     raise TimeoutError("Worker stopped reporting within its deadline")
                 return
             audit = self.ssh(worker["host"], "cat " + worker["job_dir"] + "/tool-audit.jsonl 2>/dev/null || true", timeout=15)
@@ -314,6 +454,8 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
                 result = Analysis.model_validate_json(raw)
                 if result.run_id != worker["run_id"] or result.case_id != worker["case_id"] or result.source_revision != worker["source_revision"]:
                     raise ValueError("Worker result does not match assigned task")
+                if worker.get('mode')=='operational':
+                    result.mode='operational'
                 from collections import Counter
                 from .models import Coverage
                 completed = Counter(e.get("skill") or e.get("agent_type") or e.get("helper") or e["tool"] for e in events if e.get("event") == "PostToolUse" and e.get("allowed"))
@@ -327,24 +469,31 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
                     result.coverage.insert(0, Coverage(name="Support Agent /start", state="verified" if status.get("intake_verified") else "dispatched", detail="Submitted as a real terminal user command. " + ("Case initialization and context persistence verified from this session and its tool audit." if status.get("intake_verified") else "Intake completion has not been verified; see gaps and audit.")))
                     self.store.save_evidence("status-" + worker["job_id"] + ".json", status)
                 self.store.ingest_analysis(result)
+                if worker.get('mode')=='operational':
+                    from .operational import coverage
+                    report=coverage(result.model_dump())
+                    worker['coverage_complete']=report['complete']
+                    self.store.source('drafts:'+worker['case_id'],'ready' if report['complete'] else 'partial',
+                        'Operational brief and message coverage complete.' if report['complete'] else
+                        'Partial brief published. Missing message groups: '+', '.join(c['key'] for c in report['cells'] if c['state']=='incomplete')+'. One bounded repair is allowed; missing options remain visible.')
                 if status.get("intake_verified"):
                     worker["intake_revision"] = worker["source_revision"]
             worker.update(status)
             worker["error"] = status.get("error")
             if status["state"] == "failed":
                 from datetime import timedelta
-                worker["retry_after"] = (datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                worker["retry_after"] = (datetime.now(timezone.utc)+timedelta(minutes=5 if worker.get('mode')=='operational' else 30)).isoformat()
             worker["session_id"] = status.get("session_id")
             self.store.worker(worker["key"], worker)
         except Exception as exc:
             from datetime import timedelta
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(worker["started_at"])).total_seconds()
-            if isinstance(exc, (subprocess.TimeoutExpired, RuntimeError)) and age < 1650:
+            if isinstance(exc, (subprocess.TimeoutExpired, RuntimeError)) and age < (540 if worker.get('mode')=='operational' else 1650):
                 # An SSH/export interruption does not terminate the remote process.
                 # Keep polling the same job rather than stranding its eventual result.
                 worker.update(error="Export temporarily unavailable; retrying the same job. " + str(exc)[:1000])
             else:
-                worker.update(state="failed", error=str(exc)[:1500], retry_after=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat())
+                worker.update(state="failed", error=str(exc)[:1500], retry_after=(datetime.now(timezone.utc)+timedelta(minutes=5 if worker.get('mode')=='operational' else 30)).isoformat())
             self.store.worker(worker["key"], worker)
 
     def reconcile_workers(self):
@@ -392,35 +541,31 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
                 closed_review = closed_review or self.store.kv("closed_review_day") != today
                 run_id = self.store.start_run(trigger, closed_review)
                 try:
-                    try:
-                        self.harvest()
-                    except AlreadyRunning:
-                        pass
                     self.store.source("inventory", "checking", "Checking live ownership and assignments")
-                    self.store.source("scores", "checking", "Collecting official evaluations and revisions")
-                    self.store.stage(run_id, "Collecting live cases and official evaluations")
+                    self.store.stage(run_id, "Collecting live assignments")
                     bundle = self.collect(run_id, closed_review)
                     if bundle.inventory_complete:
+                        self.store.set_kv('needs_inventory_refresh',False)
+                        self.store.set_kv('operational_window',window if trigger.startswith(('schedule:','catch-up:','activity-change')) and window else run_id)
                         self.reconcile_workers()
                     source_states = {s.key: s.state for s in bundle.sources}
                     if closed_review and source_states.get("closed_cases") == "ready":
-                        self.closed_learning(bundle)
                         self.store.set_kv("closed_review_day", today)
                     launched, failures = 0, []
                     if analyze and bundle.inventory_complete:
-                        self.store.stage(run_id, "Starting case investigations")
-                        from concurrent.futures import ThreadPoolExecutor, as_completed
-                        due = self.due_cases()
-                        with ThreadPoolExecutor(max_workers=max(1, len(due))) as pool:
-                            futures = {pool.submit(self.launch_case, case, run_id): case for case in due}
-                            for future in as_completed(futures):
-                                try:
-                                    future.result()
-                                    launched += 1
-                                except Exception as exc:
-                                    failures.append(futures[future]["number"] + ": " + str(exc)[:300])
+                        self.store.stage(run_id, "Starting operational briefs and drafts")
+                        try:
+                            jobs,failures=self.consolidate_due();launched=len(jobs)
+                        except AlreadyRunning:
+                            pass
+                    # Slow or unavailable analytics never delay activity/draft dispatch.
+                    if bundle.inventory_complete:
+                        try:
+                            self.start_scores(run_id,bundle.cases,closed_review)
+                        except Exception as exc:
+                            self.store.source('scores','unavailable','Score collection could not start; briefs/drafts continue. '+str(exc)[:600])
                     state = "complete" if bundle.inventory_complete and all(s.state == "ready" for s in bundle.sources) and not failures else "partial"
-                    detail = f"{len([c for c in bundle.cases if not c.is_closed])} open cases; {len(bundle.evaluations)} evaluations; {launched} case workers started. " + " ".join(failures)
+                    detail = f"{len([c for c in bundle.cases if not c.is_closed])} open cases; {launched} operational brief/draft jobs started; official scores collect separately. " + " ".join(failures)
                     self.store.finish_run(run_id, state, detail)
                     self.store.source("coordinator", "ready" if state == "complete" else "partial", detail)
                     if window and bundle.inventory_complete:

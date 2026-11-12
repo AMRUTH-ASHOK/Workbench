@@ -36,6 +36,7 @@ export type Draft = {
   title: string;
   body: string;
   state: string;
+  is_current?: boolean;
   updated_at: string;
   evidence: Evidence[];
 };
@@ -61,6 +62,10 @@ export type WritingStyle = {
   }[];
 };
 export type Analysis = {
+  mode?: string;
+  completed_work?: string[];
+  latest_update?: string;
+  blocker?: string;
   summary: string;
   concerns: { title?: string; reason?: string; metric?: string }[];
   next_actions: unknown[];
@@ -77,6 +82,33 @@ export type Outcome = {
   deltas: Record<string, number>;
 };
 export type Case = {
+  desk_state: string;
+  desk_error: string | null;
+  context_checked_at: string | null;
+  draft_coverage: {
+    complete: boolean;
+    cells: {
+      key: string;
+      audience: string;
+      purpose: string;
+      state: string;
+      missing: string[];
+      reason: string;
+    }[];
+  };
+  operational_context?: {
+    observed_at: string;
+    source_revision: string;
+    messages: {
+      id: string;
+      author_name: string;
+      created_at: string;
+      audience: string;
+      body: string;
+    }[];
+    documents: { source: string; text: string }[];
+    gaps: string[];
+  } | null;
   id: string;
   number: string;
   account: string;
@@ -130,6 +162,14 @@ export type Worker = {
   tab_id: string;
 };
 export type Overview = {
+  workflow: {
+    mode: string;
+    ready: number;
+    total: number;
+    with_drafts: number;
+    refreshing: number;
+    failed: number;
+  };
   owner: string;
   timezone: string;
   schedule: string[];
@@ -142,6 +182,20 @@ export type Overview = {
   runs: Run[];
   workers: Worker[];
   good_threshold: number;
+};
+export type LearningOutcomes = {
+  recorded_actions: number;
+  comparable_outcomes: number;
+  waiting_for_comparable_evaluation: number;
+  observations: {
+    audience: string;
+    metric: string;
+    sample_count: number;
+    mean_change: number;
+    confidence: string;
+    guidance: string;
+  }[];
+  limitations: string;
 };
 export type Lesson = {
   id: string;

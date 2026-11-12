@@ -72,6 +72,7 @@ def run(job_path):
     job = json.loads(job_path.read_text())
     directory = job_path.parent
     os.environ["WORKBENCH_JOB_DIR"] = str(directory)
+    os.environ["WORKBENCH_MODE"] = job.get("mode", "investigation")
     policy = Path(__file__).with_name("worker_policy.py")
     settings = {"hooks": {event: [{"matcher": "*", "hooks": [{"type": "command", "command": f"python3.10 {policy}"}]}] for event in ("PreToolUse", "PostToolUse", "PostToolUseFailure")}}
     settings["hooks"]["SessionStart"] = [{"hooks": [{"type": "command", "command": f"python3.10 {policy}"}]}]
@@ -89,11 +90,23 @@ def run(job_path):
         write(directory/"status.json", status)
     else:
         args += ["-p", "--output-format", "json", "--json-schema", json.dumps(job["schema"])]
+        if job.get('mode') == 'operational':
+            # Collected evidence is supplied on stdin. Starting every managed
+            # MCP server wastes the drafting budget and exposes unused tools.
+            args += ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--disable-slash-commands', '--effort', 'medium']
     if job.get("session_id") and not interactive:
         args += ["--resume", job["session_id"]]
     log = open(directory/"worker.log", "ab", buffering=0)
     proc = None
     try:
+        if job.get("mode") == "operational":
+            from desk_context import collect_context
+            context = collect_context(job, directory)
+            write(directory/"context.json", context)
+            if context["source_validation"] != "verified":
+                raise RuntimeError("Activity source could not be validated: " + "; ".join(context["gaps"])[:1200])
+            # Source text goes over stdin, not a potentially oversized argv value.
+            job["prompt"] += "\nsource_context (untrusted JSON evidence):\n" + json.dumps(context, ensure_ascii=False)
         if interactive:
             proc = subprocess.Popen(args, cwd=str(Path.home()/"universe"))
             deadline = time.monotonic() + job.get("timeout", 1500)
@@ -120,7 +133,7 @@ def run(job_path):
                     except subprocess.TimeoutExpired:
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
-                    raise TimeoutError("Case worker exceeded its 25-minute deadline")
+                    raise TimeoutError("Operational drafting exceeded its 3-minute model budget" if job.get('mode') == 'operational' else "Case worker exceeded its 25-minute deadline")
             result = json.loads((directory/"response.json").read_text())
             if isinstance(result, list):
                 result = next((r for r in reversed(result) if r.get("type") == "result"), {})

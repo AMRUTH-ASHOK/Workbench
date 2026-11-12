@@ -3,16 +3,22 @@
 ```mermaid
 flowchart TD
     A[Codex scheduled triggers] --> B[Local durable coordinator]
-    B --> C[Collector Arclet: live inventory and official evaluations]
+    B --> C[Fast live inventory collector]
+    B --> S[Independent official-score collector]
+    S --> D
     C --> D[(SQLite and private evidence on Mac)]
-    D --> E{Source changed, score revised, or action due?}
+    D --> E{Refresh window or source change?}
     E -->|Yes| F[Reusable case Arclets]
     E -->|No| G[Reuse valid analysis]
-    F --> H[Draft-only gate and live freshness validation]
+    F --> A1[Bounded source activity snapshot]
+    A1 --> D
+    A1 --> H[Operational drafting gate and live freshness validation]
     H --> D
     D --> I[Local React review dashboard]
     I --> J[Engineer reviews and acts manually]
     J --> K[Actions and comparable later evaluations]
+    K --> O[Cautious outcome observations]
+    O --> F
     K --> L[Reviewed local playbook]
     L --> F
 ```
@@ -39,7 +45,23 @@ sources take precedence over revision-ledger projections. Ledger fallback is
 labelled when a serving query fails. Results are immutable per revision; an
 unexpected score change under the same revision fails atomically.
 
-Each case worker runs interactive Isaac in its owned Arclet terminal. The
+Default case jobs collect recent comments and explicitly linked Jira/Slack activity
+under a 180-second budget. Source ownership, lifecycle and revision are verified.
+The early context is exported before model drafting, so source activity, observed
+sent actions and attributed writing preferences can appear independently. Privacy
+summaries remain documents, never confirmed verbatim writing examples. Ambiguous
+attribution and Slack IDs alone do not teach writing style.
+
+Noninteractive Isaac has a 180-second drafting budget and a strict operational
+tool gate: own result files and structured output only. It cannot run skills,
+agents, enrichment, SQL or diagnostic tools. Each audience/purpose needs three
+distinct lengths (plus follow-up conditions) or an explicit no-message decision.
+The coordinator publishes partial valid results, allows one coverage repair and
+bounds attempts per window and revision. Analytics checkpoints import scores
+without modifying newer live inventory. Neither score availability nor diagnostics
+is a prerequisite for message drafting.
+
+Explicit optional investigation runs interactive Isaac in its owned Arclet terminal. The
 coordinator checks that exact pane is idle, starts the guarded runner, waits for
 the SessionStart hook and terminal prompt, then types `/support-agent:start` as
 a user command using ArcaTerm's addressed, journalled pane API. This respects the

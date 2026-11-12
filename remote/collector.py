@@ -185,27 +185,32 @@ def collect(request, directory):
         status(key, "needs_auth" if auth else "unavailable", text)
 
     try:
-        sf = client("salesforce")
-        inventory = salesforce_inventory(sf, request["owner_email"])
-        status("inventory", "ready", f"Complete live queue: {len(inventory)} assigned open cases; all classes included")
-        if request.get("closed_review"):
-            try:
-                closed = salesforce_inventory(sf, request["owner_email"], True)
-                inventory += closed
-                status("closed_cases", "ready", f"{len(closed)} assigned cases closed during the past 30 days")
-            except Exception as exc:
-                failure("closed_cases", exc)
-        for row in inventory:
-            case_id = field(row, "Id")
-            email = row.get("Owner.Email") or row.get("Owner", {}).get("Email")
-            if email.lower() != request["owner_email"].lower():
-                raise RuntimeError("Live inventory returned a different owner")
-            record = dict(id=case_id, number=field(row, "CaseNumber"), account=row.get("Account.Name") or row.get("Account", {}).get("Name", ""), subject="", status=field(row, "Status"), priority=field(row, "Priority", ""), owner_email=email, owner_name=request["owner_name"], is_closed=bool(field(row, "IsClosed")), closed_at=stamp(field(row, "ClosedDate")) if field(row, "ClosedDate") else None, updated_at=stamp(field(row, "LastModifiedDate")), source="salesforce-live", revision="", metadata={})
-            record["revision"] = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
-            bundle["cases"].append(record)
-        bundle["inventory_complete"] = True
-        # Publish a usable live queue even if an analytics source fails afterward.
-        write_bundle(directory, bundle)
+        if request.get("score_cases") is not None:
+            bundle["cases"] = request["score_cases"]
+        else:
+            sf = client("salesforce")
+            inventory = salesforce_inventory(sf, request["owner_email"])
+            status("inventory", "ready", f"Complete live queue: {len(inventory)} assigned open cases; all classes included")
+            if request.get("closed_review"):
+                try:
+                    closed = salesforce_inventory(sf, request["owner_email"], True)
+                    inventory += closed
+                    status("closed_cases", "ready", f"{len(closed)} assigned cases closed during the past 30 days")
+                except Exception as exc:
+                    failure("closed_cases", exc)
+            for row in inventory:
+                case_id = field(row, "Id")
+                email = row.get("Owner.Email") or row.get("Owner", {}).get("Email")
+                if email.lower() != request["owner_email"].lower():
+                    raise RuntimeError("Live inventory returned a different owner")
+                record = dict(id=case_id, number=field(row, "CaseNumber"), account=row.get("Account.Name") or row.get("Account", {}).get("Name", ""), subject="", status=field(row, "Status"), priority=field(row, "Priority", ""), owner_email=email, owner_name=request["owner_name"], is_closed=bool(field(row, "IsClosed")), closed_at=stamp(field(row, "ClosedDate")) if field(row, "ClosedDate") else None, updated_at=stamp(field(row, "LastModifiedDate")), source="salesforce-live", revision="", metadata={})
+                record["revision"] = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
+                bundle["cases"].append(record)
+            bundle["inventory_complete"] = True
+            # Publish a usable live queue even if an analytics source fails afterward.
+            write_bundle(directory, bundle)
+        if request.get("inventory_only"):
+            return bundle
         try:
             sql = client("databricks-v2")
             for table in (OPEN, CLOSED, LEDGER):

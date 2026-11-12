@@ -1848,6 +1848,18 @@ pre {
   padding: 14px 0;
   overflow-wrap: anywhere;
 }
+.source-activity {
+  margin: 16px 0;
+  overflow-wrap: anywhere;
+}
+.source-activity article {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.source-activity > summary {
+  cursor: pointer;
+  margin-bottom: 12px;
+}
 @media (max-width: 900px) {
   .writing-audiences {
     grid-template-columns: 1fr;

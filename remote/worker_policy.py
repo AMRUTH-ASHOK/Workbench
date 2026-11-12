@@ -46,8 +46,16 @@ def helper_command(command):
     return match.group(1)
 
 
-def permitted(name, value, job_dir):
+def permitted(name, value, job_dir, mode="investigation"):
     normalized = name.replace("-", "_")
+    if mode == "operational":
+        if normalized == "StructuredOutput":
+            return True, "Return the operational brief"
+        if normalized in {"Read", "Write"}:
+            path = Path(value.get("file_path", value.get("path", ""))).expanduser().resolve()
+            allowed = {"context.json", "analysis.json", "notes.md"} if normalized == "Read" else {"analysis.json", "notes.md"}
+            return path.parent == Path(job_dir).resolve() and path.name in allowed, "Only this operational job's local evidence and result"
+        return False, "Operational drafting uses collected evidence only; no skills, enrichment, agents, diagnostics or external actions"
     if normalized in {"Read", "Glob", "Grep", "ToolSearch", "TaskOutput", "TaskList", "TaskGet", "TaskCreate", "TaskUpdate", "TodoWrite", "StructuredOutput"}:
         return True, "Local evidence and progress"
     if normalized in {"Agent", "Task"}:
@@ -143,7 +151,7 @@ def main():
         return
     name = event.get("tool_name", "")
     kind = event.get("hook_event_name", "PreToolUse")
-    allowed, reason = permitted(name, event.get("tool_input", {}), directory)
+    allowed, reason = permitted(name, event.get("tool_input", {}), directory, os.environ.get("WORKBENCH_MODE", "investigation"))
     audit = dict(at=datetime.now(timezone.utc).isoformat(), event=kind, tool=name, allowed=allowed, reason=reason, tool_use_id=event.get("tool_use_id"))
     if name == "Skill":
         audit["skill"] = event.get("tool_input", {}).get("skill")

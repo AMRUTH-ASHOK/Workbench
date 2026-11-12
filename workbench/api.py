@@ -46,6 +46,8 @@ def create_app(settings=None, enable_recovery=True):
                 while True:
                     try:
                         await asyncio.to_thread(Coordinator(store).harvest)
+                        if store.kv('runtime_ready',False):
+                            await asyncio.to_thread(Coordinator(store).consolidate_due)
                     except AlreadyRunning:
                         pass
                     except Exception as exc:
@@ -57,7 +59,9 @@ def create_app(settings=None, enable_recovery=True):
                 await asyncio.sleep(20)
                 while True:
                     key = latest_window()
-                    if store.kv("runtime_ready", False) and key and store.kv("completed_window") != key and store.kv("last_attempt_window") != key:
+                    if store.kv('runtime_ready',False) and store.kv('needs_inventory_refresh',False) and not refresh_tasks:
+                        kick_refresh(trigger='activity-change')
+                    elif store.kv("runtime_ready", False) and key and store.kv("completed_window") != key and store.kv("last_attempt_window") != key:
                         # A single catch-up collection, even when several windows were missed.
                         kick_refresh(trigger="catch-up:" + key)
                     await asyncio.sleep(60)
@@ -146,6 +150,10 @@ def create_app(settings=None, enable_recovery=True):
     @app.get('/api/writing-style')
     def writing_style():
         return store.writing_style()
+
+    @app.get('/api/learning-outcomes')
+    def learning_outcomes():
+        return store.learning_outcomes()
 
     @app.patch('/api/writing-style')
     def writing_preferences(body: WritingPreferences):

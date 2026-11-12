@@ -5,6 +5,7 @@ No credentials are copied. Only explicitly allowed collection tools are exposed.
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -14,6 +15,8 @@ READ_TOOLS = {
     "support-agent": {"get_server_info", "get_support_case", "list_support_case_comments", "list_support_case_attachments"},
     "databricks-v2": {"execute_parameterized_sql", "check_statement_status", "cancel_statement"},
     "salesforce": {"discover_salesforce_objects", "discover_salesforce_fields_on_object", "execute_soql"},
+    "jira": {"jira_read_api_call"},
+    "slack": {"slack_read_api_call"},
 }
 
 
@@ -91,6 +94,10 @@ class MCP:
     def call(self, name, arguments):
         if name not in READ_TOOLS[self.server]:
             raise ValueError("Tool is outside the collection allowlist")
+        if self.server == "jira" and (arguments.get("endpoint") != "issues.get" or not re.fullmatch(r"(?:ES|BL|GENIECODE)-\d+", arguments.get("params", {}).get("issue_id", ""))):
+            raise ValueError("Only an explicitly linked Jira issue may be read")
+        if self.server == "slack" and (arguments.get("endpoint") != "conversations.replies" or not re.fullmatch(r"[A-Z0-9]+", arguments.get("params", {}).get("channel", "")) or not re.fullmatch(r"\d+\.\d{6}", arguments.get("params", {}).get("ts", ""))):
+            raise ValueError("Only an explicitly linked Slack thread may be read")
         if name == "execute_parameterized_sql":
             statement = arguments["statement"].lstrip().lower()
             if not statement.startswith(("select ", "with ", "describe ")):

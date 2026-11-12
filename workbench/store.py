@@ -59,6 +59,9 @@ class Store:
             CREATE TABLE IF NOT EXISTS workers (key TEXT PRIMARY KEY, record TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS draft_options (draft_id TEXT PRIMARY KEY REFERENCES drafts(id), record TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS writing_examples (id TEXT PRIMARY KEY, audience TEXT NOT NULL, record TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS case_contexts (case_id TEXT PRIMARY KEY, record TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS source_messages (id TEXT PRIMARY KEY, case_id TEXT NOT NULL, record TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS action_links (action_id TEXT PRIMARY KEY, audience TEXT NOT NULL, draft_id TEXT, message_id TEXT);
             CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS lessons (
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, lesson TEXT NOT NULL,
@@ -183,6 +186,118 @@ class Store:
         temporary.replace(path)
         return str(path)
 
+    def ingest_scores(self, bundle: Bundle):
+        """Analytics checkpoints must never overwrite newer live case records."""
+        if bundle.owner_email.lower() != self.settings.owner_email.lower():
+            raise ValueError('Score owner mismatch')
+        with self.connect() as db:
+            for e in bundle.evaluations:
+                if not db.execute('SELECT 1 FROM cases WHERE id=? AND owner_email=?', (e.case_id, self.settings.owner_email)).fetchone():
+                    continue
+                identifier = hashlib.sha256(f'{e.case_id}:{e.source}:{e.result_id}'.encode()).hexdigest()
+                old = db.execute('SELECT record FROM evaluations WHERE id=?', (identifier,)).fetchone()
+                if old and json.loads(old[0])['scores'] != e.scores:
+                    raise ValueError('An existing evaluation revision changed scores')
+                db.execute('INSERT OR REPLACE INTO evaluations VALUES (?,?,?,?,?,?,?)', (identifier,e.case_id,e.result_id,e.phase,e.source,e.produced_at,dumps(e.model_dump())))
+            for source in bundle.sources:
+                if source.key in {'scores','usage','certificate'}:
+                    db.execute('INSERT OR REPLACE INTO sources VALUES (?,?)', (source.key,dumps(source.model_dump())))
+            for u in bundle.usage:
+                if db.execute('SELECT 1 FROM cases WHERE id=?', (u.get('case_id'),)).fetchone():
+                    uid = u.get('invocation_id') or hashlib.sha256(dumps(u).encode()).hexdigest()
+                    db.execute('INSERT OR REPLACE INTO usage VALUES (?,?,?)', (uid,u['case_id'],dumps(u)))
+            db.execute('INSERT OR REPLACE INTO kv VALUES (?,?)', ('score_collection_notes',dumps(bundle.notes)))
+        self.save_evidence('scores-' + bundle.run_id + '.json', bundle.model_dump())
+
+    def ingest_context(self, context):
+        """Record verified source messages, reconcile actual sends, learn own style."""
+        from difflib import SequenceMatcher
+        import re
+        from .models import timestamp
+        cid = context['case_id']
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM cases WHERE id=?', (cid,)).fetchone()
+            if not row or not row['active'] or row['revision'] != context['source_revision'] or context.get('source_validation') != 'verified':
+                raise ValueError('Activity context is stale or unverified')
+            case = json.loads(row['record']); live = context.get('live', {})
+            if live.get('case_id') != cid or live.get('is_closed') or live.get('owner_name') != self.settings.owner_name or timestamp(live.get('last_updated_ts')) != case['updated_at']:
+                raise ValueError('Activity owner/lifecycle/update mismatch')
+            db.execute('INSERT OR REPLACE INTO case_contexts VALUES (?,?)', (cid,dumps(context)))
+            prefs = self.kv('writing_preferences', {'learning_enabled':True})
+            for message in context.get('messages', []):
+                if message.get('provenance') != 'structured_source' or not message.get('id') or not message.get('body'):
+                    continue
+                try:
+                    created = timestamp(message['created_at'])
+                except (ValueError, KeyError, TypeError):
+                    continue
+                identity = cid + ':' + message['id']
+                if db.execute('SELECT 1 FROM source_messages WHERE id=?', (identity,)).fetchone():
+                    continue
+                db.execute('INSERT INTO source_messages VALUES (?,?,?)', (identity,cid,dumps(message)))
+                if message.get('author_email','').lower() != self.settings.owner_email.lower() or message.get('audience') not in {'customer','engineering','internal'}:
+                    continue
+                body = message['body']; audience = message['audience']
+                if re.search(r'privacy[- ]summary|privacy[- ]summarized|sanitized summary|redacted summary', body, re.I):
+                    continue
+                norm = lambda text: ' '.join(text.split()).casefold()
+                eligible = [dict(d) for d in db.execute('SELECT * FROM drafts WHERE case_id=? AND kind=? AND created_at<=?', (cid,audience,created))]
+                matches = [(SequenceMatcher(None,norm(body),norm(d['body'])).ratio(),d) for d in eligible if min(len(body),len(d['body'])) >= 40 and .65 <= len(body)/max(1,len(d['body'])) <= 1.5]
+                similarity, draft = max(matches, key=lambda x:x[0]) if matches else (0,None)
+                draft = draft if similarity >= .85 else None
+                manual = db.execute('SELECT id FROM actions WHERE id=?', ('draft:'+draft['id'],)).fetchone() if draft else None
+                action_id = manual['id'] if manual else 'message:' + identity
+                # An observed post is a fact even when it did not originate here.
+                db.execute("INSERT OR IGNORE INTO actions VALUES (?,?,?,?,?,'done',?,?,?,NULL)", (action_id,cid,audience.title()+' message posted',self.settings.owner_name,None,'Observed in '+message.get('source','source')+'; message '+message['id']+'. Workbench did not send it.',created,created))
+                db.execute('INSERT OR IGNORE INTO action_links VALUES (?,?,?,?)', (action_id,audience,draft['id'] if draft else None,message['id']))
+                if manual:
+                    db.execute('UPDATE actions SET completed_at=? WHERE id=?', (created,action_id))
+                    db.execute('UPDATE action_links SET message_id=? WHERE action_id=?', (message['id'],action_id))
+                if draft:
+                    if draft['revision'] == row['revision']:
+                        db.execute("UPDATE drafts SET state='manually_sent',updated_at=? WHERE id=?", (created,draft['id']))
+                    options = self._draft_options(db,draft['id'])
+                    for title in options.get('completes_actions',[]):
+                        if re.match(r'^(send|post|share|reply|follow up)\b',title,re.I):
+                            db.execute("UPDATE actions SET state='done',completed_at=? WHERE case_id=? AND title=? AND state='proposed' AND created_at<=?", (created,cid,title,created))
+                            for completed in db.execute("SELECT id FROM actions WHERE case_id=? AND title=? AND completed_at=?", (cid,title,created)).fetchall():
+                                db.execute('INSERT OR REPLACE INTO action_links VALUES (?,?,?,?)', (completed['id'],audience,draft['id'],message['id']))
+                detail = dict(message_id=message['id'],audience=audience,draft_id=draft['id'] if draft else None,match='exact' if draft and norm(draft['body'])==norm(body) else 'edited' if draft else 'observed')
+                db.execute('INSERT INTO events VALUES (?,?,?,?,?)', ('observed:' + identity,cid,'message_observed',dumps(detail),created))
+                # Exact model output is not evidence of personal writing style.
+                generated = any(norm(body)==norm(d['body']) and draft_key(cid,d['revision'],d['kind'],d['body'],self._draft_options(db,d['id'])['variant'],self._draft_options(db,d['id'])['scenario'])==d['id'] for d in eligible)
+                ai_note = re.search(r'(?:this (?:comment|message|document|report) (?:was |is )?generated by|unvalidated AI|\bAI[- ]generated\b|generated (?:by|using|with) (?:an? )?(?:AI|ChatGPT|Claude|Isaac)\b)',body,re.I)
+                identifier = 'sent:' + identity
+                forgotten = db.execute('SELECT 1 FROM kv WHERE key=?', ('forgotten_writing:'+identifier,)).fetchone()
+                if prefs['learning_enabled'] and not generated and not ai_note and not forgotten and len(body.strip())>=40:
+                    self._save_writing_example(db,identifier,audience,body,'My attributed sent '+audience+' message',identity)
+        self.save_evidence('context-' + cid + '.json', context)
+
+    def learning_outcomes(self):
+        """Evidence for future drafts, never automatically promoted to a rule."""
+        with self.connect() as db:
+            ids = [r[0] for r in db.execute("SELECT DISTINCT case_id FROM actions WHERE state='done'")]
+            links = {r['action_id']:dict(r) for r in db.execute('SELECT * FROM action_links')}
+        groups = {}; recorded = comparable = 0; seen=set()
+        for cid in ids:
+            for outcome in self.case(cid)['outcomes']:
+                message_id=links.get(outcome['action_id'],{}).get('message_id')
+                if message_id and (cid,message_id) in seen:
+                    continue
+                if message_id:
+                    seen.add((cid,message_id))
+                recorded += 1
+                if not outcome['after'] or not outcome['deltas']:
+                    continue
+                comparable += 1
+                audience = links.get(outcome['action_id'],{}).get('audience','other')
+                before = outcome['before']
+                for metric, delta in outcome['deltas'].items():
+                    key = (audience,metric,before['phase'],before['source'],before['model'],before['rubric'])
+                    values = groups.setdefault(key,[]);values.append(delta)
+        observations = [dict(audience=k[0],metric=k[1],phase=k[2],source=k[3],model=k[4],rubric=k[5],sample_count=len(v),mean_change=round(sum(v)/len(v),3),positive=sum(x>0 for x in v),negative=sum(x<0 for x in v),confidence='limited' if len(v)<3 else 'observational',guidance='Association only; product changes, other actions and evaluator behavior may explain the difference.') for k,v in groups.items()]
+        return dict(recorded_actions=recorded,comparable_outcomes=comparable,waiting_for_comparable_evaluation=recorded-comparable,observations=observations,limitations='Only evaluations produced before the action form baselines; follow-ups must cover later evidence with the same source, phase, model and rubric. No causal claims or automatic rule approvals.')
+
     def ingest_analysis(self, analysis: Analysis):
         with self.connect() as db:
             case = db.execute("SELECT revision,active FROM cases WHERE id=?", (analysis.case_id,)).fetchone()
@@ -198,7 +313,7 @@ class Store:
             for draft in analysis.drafts:
                 key = draft_key(analysis.case_id, analysis.source_revision, draft.kind, draft.body, draft.variant, draft.scenario)
                 db.execute("""INSERT OR IGNORE INTO drafts VALUES (?,?,?,?,?,?,?,'draft',?,?)""", (key, analysis.case_id, analysis.source_revision, draft.kind, draft.title, draft.body, dumps([e.model_dump() for e in draft.evidence]), now(), now()))
-                options = {k: getattr(draft, k) for k in ('variant', 'scenario', 'use_when', 'review_notes')}
+                options = {k: getattr(draft, k) for k in ('variant', 'scenario', 'use_when', 'review_notes', 'completes_actions')}
                 db.execute("INSERT OR REPLACE INTO draft_options VALUES (?,?)", (key, dumps(options)))
             if self.kv('writing_preferences', {'learning_enabled': True})['learning_enabled']:
                 for observation in analysis.writing_observations:
@@ -228,21 +343,34 @@ class Store:
             current = canonical
         case["evaluation"] = current[-1] if current else None
         case["bands"] = {k: score_band(v) for k, v in (case["evaluation"]["scores"] if case["evaluation"] else {}).items()}
-        case["draft_count"] = db.execute("SELECT count(*) FROM drafts WHERE case_id=? AND state IN ('draft','reviewed')", (case["id"],)).fetchone()[0]
+        case["draft_count"] = db.execute("SELECT count(*) FROM drafts WHERE case_id=? AND revision=? AND state IN ('draft','reviewed','copied')", (case["id"],case['revision'])).fetchone()[0]
+        from .operational import coverage
+        current_drafts = [dict(r) | self._draft_options(db, r['id']) for r in db.execute("SELECT * FROM drafts WHERE case_id=? AND revision=? AND state IN ('draft','reviewed','copied')", (case['id'], case['revision']))]
+        case['draft_coverage'] = coverage(case['analysis'] if not case['analysis_stale'] else {}, current_drafts)
+        worker_row = db.execute("SELECT record FROM workers WHERE key=?", (case['id'],)).fetchone()
+        worker = json.loads(worker_row[0]) if worker_row else {}
+        context_row = db.execute('SELECT record FROM case_contexts WHERE case_id=?', (case['id'],)).fetchone()
+        context = json.loads(context_row[0]) if context_row else None
+        case['desk_state'] = ('ready' if case['draft_coverage']['complete'] and not case['analysis_stale'] else
+            'refreshing' if worker.get('state') in {'working','starting'} else
+            'failed' if worker.get('state') in {'failed','unavailable'} else 'incomplete')
+        case['desk_error'] = worker.get('error') if case['desk_state'] == 'failed' else None
+        case['context_checked_at'] = context.get('observed_at') if context else None
         case["actions"] = [dict(r) for r in db.execute("SELECT * FROM actions WHERE case_id=? ORDER BY CASE state WHEN 'proposed' THEN 0 WHEN 'done' THEN 1 ELSE 2 END, due_at IS NULL, due_at,created_at", (case["id"],))]
         if detail:
+            case['operational_context'] = context
             case["history"] = evaluations
-            case["drafts"] = [dict(r) | {"evidence": json.loads(r["evidence"])} | self._draft_options(db, r['id']) for r in db.execute("SELECT * FROM drafts WHERE case_id=? ORDER BY created_at DESC", (case["id"],))]
+            case["drafts"] = [dict(r) | {"is_current":r['revision']==case['revision'] and bool(row['active']),"evidence": json.loads(r["evidence"])} | self._draft_options(db, r['id']) for r in db.execute("SELECT * FROM drafts WHERE case_id=? ORDER BY created_at DESC", (case["id"],))]
             case["usage"] = [json.loads(r[0]) for r in db.execute("SELECT record FROM usage WHERE case_id=?", (case["id"],))]
             case["events"] = [dict(r) for r in db.execute("SELECT * FROM events WHERE case_id=? ORDER BY created_at DESC LIMIT 100", (case["id"],))]
             case["outcomes"] = []
             for action in case["actions"]:
                 if action["state"] != "done" or not action["completed_at"]:
                     continue
-                before = [e for e in evaluations if e["covered_at"] and e["covered_at"] <= action["completed_at"]]
-                after = [e for e in evaluations if e["covered_at"] and e["covered_at"] > action["completed_at"]]
-                baseline = before[-1] if before else None
-                followup = next((e for e in after if baseline and e["source"] == baseline["source"] and e["phase"] == baseline["phase"] and e["model"] == baseline["model"] and e["rubric"] == baseline["rubric"]), None)
+                before = [e for e in evaluations if e["covered_at"] and e["model"] and e["rubric"] and e["covered_at"] <= action["completed_at"] and e['produced_at'] <= action['completed_at']]
+                after = [e for e in evaluations if e["covered_at"] and e["covered_at"] > action["completed_at"] and e['produced_at'] > action['completed_at']]
+                baseline = max(before, key=lambda e:(e['covered_at'], e['produced_at'])) if before else None
+                followup = next((e for e in sorted(after, key=lambda e:(e['covered_at'], e['produced_at'])) if baseline and e["source"] == baseline["source"] and e["phase"] == baseline["phase"] and e["model"] == baseline["model"] and e["rubric"] == baseline["rubric"]), None)
                 deltas = {k: round(followup["scores"][k] - v, 3) for k, v in baseline["scores"].items() if v is not None and followup and followup["scores"].get(k) is not None} if baseline else {}
                 case["outcomes"].append(dict(action_id=action["id"], title=action["title"], completed_at=action["completed_at"], before=baseline, after=followup, deltas=deltas))
         return case
@@ -261,8 +389,10 @@ class Store:
             return self._case(db, row, True) if row else None
 
     def overview(self):
+        cases=self.cases()
         with self.connect() as db:
             return dict(
+                workflow=dict(mode='operational',ready=sum(c['desk_state']=='ready' for c in cases),total=len(cases),with_drafts=sum(c['draft_count']>0 for c in cases),refreshing=sum(c['desk_state']=='refreshing' for c in cases),failed=sum(c['desk_state']=='failed' for c in cases)),
                 owner=self.settings.owner_name, timezone=self.settings.timezone,
                 schedule=["13:30", "16:15", "19:00", "22:00"], days="Monday–Friday",
                 inventory_complete=self.kv("inventory_complete", False),
@@ -304,12 +434,13 @@ class Store:
                 recorded = now()
                 title = ("Feedback manually submitted: " if state == "submitted_manually" else "Communication manually sent: ") + draft["title"]
                 db.execute("INSERT OR IGNORE INTO actions VALUES (?,?,?,?,?,'done',?,?,?,NULL)", ("draft:" + draft_id, draft["case_id"], title, self.settings.owner_name, None, "Engineer recorded this action manually. Workbench did not send or submit anything.", recorded, recorded))
+                db.execute('INSERT OR IGNORE INTO action_links VALUES (?,?,?,NULL)', ('draft:' + draft_id, draft['kind'], draft_id))
             return dict(db.execute("SELECT * FROM drafts WHERE id=?", (draft_id,)).fetchone())
 
     @staticmethod
     def _draft_options(db, identifier):
         row = db.execute('SELECT record FROM draft_options WHERE draft_id=?', (identifier,)).fetchone()
-        return json.loads(row[0]) if row else dict(variant='standard', scenario='update', use_when='', review_notes='')
+        return dict(variant='standard', scenario='update', use_when='', review_notes='', completes_actions=[]) | (json.loads(row[0]) if row else {})
 
     def _save_writing_example(self, db, identifier, audience, body, label, reference):
         from .writing import features
@@ -344,7 +475,7 @@ class Store:
         with self.connect() as db:
             if not db.execute('DELETE FROM writing_examples WHERE id=?', (identifier,)).rowcount:
                 raise KeyError('Writing example not found')
-            if identifier.startswith('history:'):
+            if identifier.startswith(('history:', 'sent:')):
                 db.execute('INSERT OR REPLACE INTO kv VALUES (?,?)', ('forgotten_writing:' + identifier, dumps(True)))
 
     def writing_style(self, for_worker=False):

@@ -52,11 +52,9 @@ test("message audiences, lengths and conditional follow-ups remain separate", as
     page.getByRole("heading", { name: "Your writing style", exact: true }),
   ).toBeVisible();
   await expect(
-    page
-      .locator(".writing-audiences article")
-      .filter({
-        has: page.getByRole("heading", { name: "Internal", exact: true }),
-      }),
+    page.locator(".writing-audiences article").filter({
+      has: page.getByRole("heading", { name: "Internal", exact: true }),
+    }),
   ).toContainText("1 confirmed examples");
   await page
     .getByLabel("Preferences for customer", { exact: true })
@@ -149,4 +147,30 @@ test("navigation and compact layout work without horizontal overflow", async ({
   await page.screenshot({ path: "test-results/mobile.png" });
   await page.getByRole("button", { name: "All cases", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Your queue" })).toBeVisible();
+});
+
+test("readiness gaps and independent learning observations are visible", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /00000001.*Example account/ }).click();
+  await page.getByRole("button", { name: "Drafts (1)", exact: true }).click();
+  await expect(page.getByText(/Coverage incomplete:/)).toBeVisible();
+  await page.getByRole("button", { name: "Engineering", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Draft options are incomplete" }),
+  ).toBeVisible();
+  await expect(page.getByText(/This is a readiness gap/)).toBeVisible();
+  await page.getByRole("button", { name: "Operations", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Operational desk readiness" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Official scores collect independently/),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Learning", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Learning from actual activity" }),
+  ).toBeVisible();
+  await expect(page.getByText(/awaiting comparable evidence/)).toBeVisible();
 });

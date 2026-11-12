@@ -37,12 +37,12 @@ the installer after changing the application. `Workbench.command` opens the desk
 - The first successful refresh each day also reviews a 30-day closure window.
 - Codex heartbeat automations trigger the existing coordinator. A local recovery
   check coalesces missed windows into one catch-up during the working shift.
-- One reusable Arclet per active case, plus the collector and research workers
-  when needed. Only documented Support Agent intake/read agents can run inside
-  a case worker, under the same tool gate.
-- A source/evaluation revision or due action can trigger investigation. Unchanged
-  waiting cases reuse their evidence. Collection and case analysis have separate
-  progress, timestamps, and failure states.
+- One reusable Arclet per active case, plus separate inventory and score collectors.
+- The default is an operational desk: consolidate what happened, completed work,
+  current status, blockers, next owner and next action; prepare message choices.
+  Each window refreshes existing activity without starting technical diagnostics.
+- Case activity and drafts run independently of optional investigations and slow
+  official-score collection. An early source snapshot appears while drafts finish.
 - Authentication problems appear under Operations. Complete the normal login in
   ArcaTerm or the linked source, then choose Resume / refresh.
 
@@ -68,9 +68,18 @@ message purpose and length in the Drafts view. Review notes and follow-up
 conditions stay outside the copyable message. EPIC-A output is optional reference;
 workers independently write from case evidence, preserving uncertainty and actual
 commitments across versions. Existing legacy drafts remain under Original.
+Coverage is checked for each audience and purpose: all three distinct lengths,
+conditional follow-ups, or an explicit no-message-needed reason. Partial useful
+results remain visible. One bounded coverage repair and up to three job attempts
+per window/source revision prevent retry loops. The dashboard distinguishes
+refreshing, failed and incomplete options from a deliberate no-message decision.
 
 The Learning desk holds separate writing preferences for customer, engineering
-and internal messages. Add your own sent example, use **Save & learn from my
+and internal messages. Attributed structured source messages are automatically
+matched to earlier suggestions and edits. Actual post timestamps record completed
+communication actions. Only explicitly linked communication tasks are completed;
+posting a message never proves a deployment or technical investigation occurred.
+Add your own sent example, use **Save & learn from my
 edit**, or mark an edited message as manually sent. Unchanged generated drafts,
 copying, review marks and feedback do not train the writing profile. Attributed
 sent-history observations from investigations are stored separately as tentative
@@ -82,13 +91,17 @@ precedence. Pause adaptive learning or forget examples/history in the Learning
 desk. Pausing stops new learning and use of learned patterns in future workers;
 existing drafts remain unchanged. This profile does not alter AGENTS.md.
 
-Support Agent `/start` is submitted as a real user slash command in the owned
+Technical investigation is optional: `workbench investigate <case-number>`.
+For that explicit path, Support Agent `/start` is submitted as a real user slash command in the owned
 ArcaTerm pane. Its `disable-model-invocation` flag is respected: the coordinator
 never tries to invoke it through the model Skill tool. Each invocation keeps a
 journalled terminal receipt; intake completion is verified separately from dispatch.
 
-Tool coverage distinguishes actual worker calls from official ingested usage.
-Useful diagnostics are selected for the case, without tool-call quotas. Feedback
+Operational source collection reads recent comments and a bounded number of
+explicitly linked Jira issues and Slack threads. Missing optional sources become
+gaps. The operational model can only return its structured result and read/write
+its own result files; skills, enrichment, agents, SQL and diagnostics are denied.
+Tool coverage distinguishes actual worker calls from official ingested usage. Feedback
 drafts are based on observed tool behavior and never count as submitted feedback.
 
 The worker's PreToolUse gate denies communication writes, feedback submission,
@@ -128,6 +141,7 @@ this personal workbench; use a separate data directory when changing identities.
 .venv/bin/python -m workbench refresh --trigger manual
 .venv/bin/python -m workbench refresh --closed-review --collect-only
 .venv/bin/python -m workbench analyze <assigned-case-number>
+.venv/bin/python -m workbench investigate <assigned-case-number> # optional diagnostics
 .venv/bin/python -m workbench harvest
 .venv/bin/python -m workbench status
 ```
@@ -156,6 +170,10 @@ receive approved lessons only. `AGENTS.md` stays stable. Action records are pair
 only with later evaluations whose evidence cutoffs include the action and whose
 source, phase, model and rubric are comparable. Changes show associations, not
 proof that the action caused the score to change.
+Baselines must have been produced before the action. Automatically observed
+actions and comparable score changes feed cautious audience-specific observations
+into future drafting. They never automatically approve a playbook rule. Unknown
+model/rubric or missing evidence cutoffs remain a gap, rather than a claimed result.
 
 ## Verification
 
