@@ -470,8 +470,7 @@ Return the supplied JSON schema. No outbound messages are sent. Full task contex
                     self.store.save_evidence("status-" + worker["job_id"] + ".json", status)
                 self.store.ingest_analysis(result)
                 if worker.get('mode')=='operational':
-                    from .operational import coverage
-                    report=coverage(result.model_dump())
+                    report=self.store.case(worker['case_id'])['draft_coverage']
                     worker['coverage_complete']=report['complete']
                     self.store.source('drafts:'+worker['case_id'],'ready' if report['complete'] else 'partial',
                         'Operational brief and message coverage complete.' if report['complete'] else

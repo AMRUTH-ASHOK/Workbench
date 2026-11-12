@@ -299,6 +299,9 @@ class Store:
         return dict(recorded_actions=recorded,comparable_outcomes=comparable,waiting_for_comparable_evaluation=recorded-comparable,observations=observations,limitations='Only evaluations produced before the action form baselines; follow-ups must cover later evidence with the same source, phase, model and rubric. No causal claims or automatic rule approvals.')
 
     def ingest_analysis(self, analysis: Analysis):
+        if analysis.mode == 'operational':
+            from .operational import guard_commitments
+            analysis = guard_commitments(analysis)
         with self.connect() as db:
             case = db.execute("SELECT revision,active FROM cases WHERE id=?", (analysis.case_id,)).fetchone()
             if not case or not case["active"] or case["revision"] != analysis.source_revision:

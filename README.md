@@ -73,6 +73,9 @@ conditional follow-ups, or an explicit no-message-needed reason. Partial useful
 results remain visible. One bounded coverage repair and up to three job attempts
 per window/source revision prevent retry loops. The dashboard distinguishes
 refreshing, failed and incomplete options from a deliberate no-message decision.
+New calendar commitments are chosen by the engineer. Generated standalone
+next-update date promises are removed from drafts and flagged in review notes;
+existing sourced commitments remain in the brief.
 
 The Learning desk holds separate writing preferences for customer, engineering
 and internal messages. Attributed structured source messages are automatically

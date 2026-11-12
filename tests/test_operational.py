@@ -335,3 +335,23 @@ def test_model_retry_reuses_dated_context_only_after_fresh_live_validation(tmp_p
     result=desk_context.collect_context(job,tmp_path)
     assert calls==['get_support_case'] and result['reused']
     assert result['observed_at']==collected and 'dated' in result['gaps'][0]
+
+
+def test_generated_calendar_promise_is_removed_without_erasing_release_facts(store):
+    store.ingest(bundle())
+    a=analysis(mode='operational',drafts=[dict(kind='customer',title='Status update',body='The build entered validation on November 10. We are awaiting release confirmation.\n\nNext update by Monday, November 16, 2026, 5:00 PM IST.\n\nBest regards')])
+    store.ingest_analysis(a)
+    draft=store.case(CASE_ID)['drafts'][0]
+    assert 'Next update by' not in draft['body'] and 'November 10' in draft['body']
+    assert 'calendar promise was omitted' in draft['review_notes']
+    assert 'Next update by' in a.drafts[0].body
+    store.patch_draft(draft['id'],DraftPatch(body='My reviewed wording with my own agreed checkpoint.'))
+    store.ingest_analysis(a)
+    assert any(d['body']=='My reviewed wording with my own agreed checkpoint.' for d in store.case(CASE_ID)['drafts'])
+
+
+def test_preserved_human_draft_cannot_make_complete_variants_look_missing():
+    report=complete_report().model_dump()
+    duplicate=dict(report['drafts'][0],state='reviewed')
+    report['drafts'].append(duplicate)
+    assert coverage(report)['complete']
